@@ -1,0 +1,11 @@
+pupil_mask:
+  diameter: 1
+  grid_size: 1.1
+  dimensions: 400
+
+detector:
+  pixel_size: .1
+  roi: 400
+
+zernike_dm:
+  nb_Zernike_modes: 10
