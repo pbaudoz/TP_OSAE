@@ -15,17 +15,17 @@ detector:
   interface: camera
   requires_safety: false
 
-  camera_id: "DEV_1AB22C00C211"
-  device_name: Allied Alvium 1800 U-500m
+  camera_id: "DEV_1AB22C054FE7"
+  device_name: Allied Alvium 1800 U-040m
   pixel_format: Mono8
 
   offset_x: 0
   offset_y: 0
-  width: 2592
-  height: 1944
-  sensor_width: 2592
-  sensor_height: 1944
+  width: 728
+  height: 544
+  sensor_width: 728
+  sensor_height: 544
   exposure_time: 200
-  gain: 20
+  gain: 0
 
   bit_saturation: 8
