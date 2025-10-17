@@ -25,7 +25,7 @@ detector:
   height: 544
   sensor_width: 728
   sensor_height: 544
-  exposure_time: 200
+  exposure_time: 400
   gain: 0
 
   bit_saturation: 8
