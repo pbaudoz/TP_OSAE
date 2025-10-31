@@ -23,24 +23,22 @@ def _connect_to_camera():
     return _camera
 
 def get_live_image():
-    """
-    Capture une image de la caméra et la renvoie sous forme de tableau NumPy.
-    Gère la connexion à la caméra.
-    """
     camera = _connect_to_camera()
     try:
-        # take_raw_exposures renvoie un générateur, next() pour obtenir la première image
         image = next(camera.take_raw_exposures(NUM_EXPOSURES))
-        
-        # --- Normalisation de l'image --- 
         image = (image - np.min(image)) / (np.max(image) - np.min(image)) * 255
-        image = np.clip(image, 0, 255).astype(np.uint8)  # Assure que l'image reste entre 0 et 255
-        
+        image = np.clip(image, 0, 255).astype(np.uint8)
+
+        # Découpe du ROI si défini
+        if hasattr(camera, "roi"):
+            x, y, w, h = camera.roi
+            image = image[y:y+h, x:x+w]
+
         return image
     except Exception as e:
         print(f"❌ Erreur lors de la capture d'image : {e}")
         return None
-
+    
 def capture_and_save_image():
     """Capture une image unique et l'enregistre, écrasant l'ancienne."""
     image = get_live_image()
@@ -72,3 +70,33 @@ def show_live():
 
 if __name__ == "__main__":
     show_live()
+
+def set_camera_roi(x, y, width, height):
+    """
+    Définit une région d'intérêt (ROI) dans l'image capturée.
+    ⚠️ La caméra du banc de test ne gère pas forcément ça matériellement,
+    donc on découpe l'image après capture.
+    """
+    global _camera
+    if _camera is None:
+        _connect_to_camera()
+
+    # On ne peut pas vraiment configurer le ROI matériellement,
+    # donc on mémorise la zone pour la découper au besoin.
+    _camera.roi = (x, y, width, height)
+    print(f"✅ ROI défini : x={x}, y={y}, w={width}, h={height}")
+
+
+def set_camera_exposure(exposure_us):
+    """
+    Définit le temps d'exposition de la caméra, en microsecondes.
+    """
+    global _camera
+    if _camera is None:
+        _connect_to_camera()
+
+    try:
+        _camera.exposure_time = exposure_us
+        print(f"✅ Temps d'exposition réglé sur {exposure_us / 1e6:.3f} s")
+    except Exception as e:
+        print(f"❌ Impossible de régler l'exposition : {e}")
