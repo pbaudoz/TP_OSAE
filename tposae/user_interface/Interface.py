@@ -1,131 +1,120 @@
 import tkinter as tk
-from tkinter import Label, Button
+from tkinter import Label, Button, Entry
 from PIL import Image, ImageTk
 import cv2
 import numpy as np
-from visualisation import get_live_image
-from Reference import process_and_save_images  # Assurez-vous que cette fonction est bien définie
-from visualisation import capture_and_save_image  # Assurez-vous que cette fonction est définie
+from visualisation import get_live_image, set_camera_roi, set_camera_exposure
+from Reference import process_and_save_images
+from visualisation import capture_and_save_image
 
 # Fonction pour assigner les coordonnées x_min, x_max, y_min, y_max depuis le fichier
 def assign_coordinates_from_file(filename='reference.txt'):
     """Assigner les coordonnées xmin, xmax, ymin, ymax directement à partir d'un fichier texte."""
-    global x_min, x_max, y_min, y_max
+    coords = {}
     try:
         with open(filename, 'r') as file:
             for line in file:
                 line = line.strip()
-                if line.startswith('x_min'):
-                    x_min = int(line.split(": ")[1])
-                elif line.startswith('x_max'):
-                    x_max = int(line.split(": ")[1])
-                elif line.startswith('y_min'):
-                    y_min = int(line.split(": ")[1])
-                elif line.startswith('y_max'):
-                    y_max = int(line.split(": ")[1])
-
-        print(f"✅ Coordonnées assignées : x_min = {x_min}, x_max = {x_max}, y_min = {y_min}, y_max = {y_max}")
+                if ":" in line:
+                    key, val = line.split(":")
+                    coords[key.strip()] = int(val.strip())
+        print(f"✅ Coordonnées assignées : {coords}")
+        return coords
     except Exception as e:
         print(f"❌ Erreur lors de l'assignation des coordonnées : {e}")
+        return None
 
-# Fonction pour afficher et traiter l'image
+
 def show_live_and_reference_image():
-    """Affiche la caméra en temps réel et l'image zoomée avec les centres lumineux dans une fenêtre Tkinter."""
+    """Affiche la caméra en temps réel et l'image de référence dans une fenêtre Tkinter."""
 
     # Lire les coordonnées depuis le fichier
-    assign_coordinates_from_file('reference.txt')
+    coords = assign_coordinates_from_file('reference.txt')
+
+    # Si on a trouvé des coordonnées, on met à jour la caméra pour définir cette zone comme ROI
+    if coords:
+        x_min, x_max = coords['x_min'], coords['x_max']
+        y_min, y_max = coords['y_min'], coords['y_max']
+        width = x_max - x_min
+        height = y_max - y_min
+
+        # 🔧 Ici, on ajuste le ROI de la caméra directement :
+        set_camera_roi(x_min, y_min, width, height)
 
     def update_image():
         """Met à jour l'image affichée dans la fenêtre Tkinter pour la caméra en temps réel."""
         image = get_live_image()  # Capture de l'image en temps réel depuis la caméra
         if image is not None:
-            # Appliquer un zoom sur l'image en temps réel en utilisant les coordonnées lues
-            height, width = image.shape[:2]
-            
-            # Limiter les coordonnées pour qu'elles ne dépassent pas les dimensions de l'image
-            zoom_x_min = max(0, min(x_min, width - 1))
-            zoom_x_max = max(0, min(x_max, width))
-            zoom_y_min = max(0, min(y_min, height - 1))
-            zoom_y_max = max(0, min(y_max, height))
-
-            # Découper l'image en fonction des coordonnées
-            zoomed_image = image[zoom_y_min:zoom_y_max, zoom_x_min:zoom_x_max]
-
-            # Convertir l'image NumPy en image PIL pour Tkinter
-            img_pil = Image.fromarray(cv2.cvtColor(zoomed_image, cv2.COLOR_BGR2RGB))
+            img_pil = Image.fromarray(cv2.cvtColor(image, cv2.COLOR_BGR2RGB))
             img_tk = ImageTk.PhotoImage(img_pil)
-
-            # Mettre à jour l'image dans le label Tkinter
             live_video_label.config(image=img_tk)
-            live_video_label.image = img_tk  # Référence pour éviter la suppression par le GC
+            live_video_label.image = img_tk
         else:
             print("❌ Aucune image capturée.")
-        
-        # Continuer à mettre à jour toutes les 10ms
         root.after(10, update_image)
 
     def update_reference_image():
         """Met à jour l'image de référence dans le Tkinter."""
         try:
-            # Charger l'image zoomée avec les pixels rouges marqués
-            reference_image = cv2.imread('image_reference_centre.jpg')  # Assure-toi que cette image existe
+            reference_image = cv2.imread('image_reference_centre.jpg')
             if reference_image is not None:
-                # Convertir l'image NumPy en image PIL pour Tkinter
                 img_pil = Image.fromarray(cv2.cvtColor(reference_image, cv2.COLOR_BGR2RGB))
                 img_tk = ImageTk.PhotoImage(img_pil)
-
-                # Mettre à jour l'image dans le label Tkinter
                 reference_image_label.config(image=img_tk)
-                reference_image_label.image = img_tk  # Référence pour éviter la suppression par le GC
-            else:
-                print("❌ Impossible de charger l'image de référence.")
+                reference_image_label.image = img_tk
         except Exception as e:
             print(f"Erreur lors de l'affichage de l'image de référence : {e}")
-        
-        # Continuer à mettre à jour toutes les 1000ms (1 seconde)
         root.after(1000, update_reference_image)
 
     def acquire_new_reference_image():
-        """Acquérir une nouvelle image de référence, traiter et mettre à jour l'image de référence."""
-        # Appeler la fonction pour capturer et sauvegarder une nouvelle image de référence
-        capture_and_save_image()  # Cette fonction doit capturer et sauvegarder 'image_reference.jpg'
-        
-        # Appeler la fonction pour traiter l'image et générer l'image de référence avec les centres lumineux
-        process_and_save_images('image_reference.jpg')  # Cette fonction doit traiter l'image et sauvegarder 'image_reference_centre.jpg'
-
-        # Mettre à jour l'image de référence affichée
+        """Acquérir une nouvelle image de référence."""
+        capture_and_save_image()
+        process_and_save_images('image_reference.jpg')
         update_reference_image()
+
+    def update_exposure():
+        """Met à jour le temps d'exposition en secondes (converti en µs)."""
+        try:
+            exposure_s = float(exposure_entry.get())
+            exposure_us = exposure_s * 1e6
+            set_camera_exposure(exposure_us)
+            print(f"✅ Exposition réglée sur {exposure_s:.3f} s")
+        except Exception as e:
+            print(f"❌ Erreur lors du réglage de l'exposition : {e}")
 
     # Créer la fenêtre Tkinter
     root = tk.Tk()
     root.title("Caméra en Temps Réel et Image de Référence")
 
-    # Créer un frame pour la caméra en temps réel
+    # --- Section vidéo live ---
     live_video_frame = tk.Frame(root)
     live_video_frame.pack(side=tk.LEFT, padx=10, pady=10)
-
-    # Créer un label pour afficher l'image de la caméra en temps réel
     live_video_label = Label(live_video_frame)
     live_video_label.pack()
 
-    # Créer un frame pour l'image de référence
+    # --- Section image de référence ---
     reference_image_frame = tk.Frame(root)
     reference_image_frame.pack(side=tk.RIGHT, padx=10, pady=10)
-
-    # Créer un label pour afficher l'image de référence (zoomée avec les pixels rouges)
     reference_image_label = Label(reference_image_frame)
     reference_image_label.pack()
 
-    # Créer un bouton pour acquérir une nouvelle image de référence
+    # --- Boutons et entrées ---
     acquire_button = Button(root, text="Acquérir une nouvelle image de référence", command=acquire_new_reference_image)
     acquire_button.pack(pady=10)
 
-    # Lancer la mise à jour des images
-    update_image()  # Lancer la mise à jour de l'image en temps réel
-    update_reference_image()  # Lancer la mise à jour de l'image de référence
+    exposure_label = Label(root, text="Exposition (s) :")
+    exposure_label.pack()
+    exposure_entry = Entry(root)
+    exposure_entry.insert(0, "0.02")  # Exposition initiale de 20 ms
+    exposure_entry.pack()
+    exposure_button = Button(root, text="Appliquer", command=update_exposure)
+    exposure_button.pack(pady=5)
 
-    # Démarrer la boucle Tkinter
+    # --- Boucles d’update ---
+    update_image()
+    update_reference_image()
     root.mainloop()
+
 
 if __name__ == "__main__":
     show_live_and_reference_image()
