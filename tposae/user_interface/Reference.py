@@ -1,33 +1,57 @@
 import cv2
 import numpy as np
 
+# --- Détection des spots ---
 def detect_spots(image, threshold=0.12, min_area=10):
-    """Détecte les centres lumineux dans l'image"""
-    # Normalisation de l'image entre 0 et 1
     norm_image = (image - image.min()) / (image.max() - image.min())
-    
-    # Créer une image binaire en fonction du seuil
     binary_image = (norm_image > threshold).astype(np.uint8)
-
-    # Appliquer un flou pour réduire le bruit
     blurred_image = cv2.GaussianBlur(binary_image, (5, 5), 0)
-
-    # Trouver les contours
     contours, _ = cv2.findContours(blurred_image, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-
-    centers = []  # Liste pour stocker les centres des spots
+    centers = []
     for contour in contours:
-        # Filtrer les petites zones qui peuvent être du bruit
         if cv2.contourArea(contour) >= min_area:
-            # Calculer le centre du contour
-            moments = cv2.moments(contour)
-            if moments["m00"] != 0:
-                # Calcul du centre basé sur les moments
-                center = (int(moments["m10"] / moments["m00"]), int(moments["m01"] / moments["m00"]))
-                centers.append(center)
-    
-    # Retourner un array NumPy des centres
+            M = cv2.moments(contour)
+            if M["m00"] != 0:
+                cx = int(M["m10"] / M["m00"])
+                cy = int(M["m01"] / M["m00"])
+                centers.append((cx, cy))
     return np.array(centers)
+
+# --- Mettre à jour la section centres des spots dans reference.txt ---
+def update_reference_centers(reference_file, centers):
+    try:
+        with open(reference_file, 'r') as f:
+            lines = f.readlines()
+    except FileNotFoundError:
+        lines = []
+
+    new_lines = []
+    inside_section = False
+
+    for line in lines:
+        stripped = line.strip()
+        if stripped == "#BEGIN centres des spots":
+            inside_section = True
+            continue
+        if stripped == "#END centres des spots":
+            inside_section = False
+            continue
+        if not inside_section:
+            new_lines.append(line)
+
+    # Ajouter la section complète au fichier
+    if new_lines and new_lines[-1].strip() != "":
+        new_lines.append("\n")
+    new_lines.append("#BEGIN centres des spots\n")
+    for c in centers:
+        new_lines.append(f"{c[0]},{c[1]}\n")
+    new_lines.append("#END centres des spots\n")
+
+    # Écrire dans le fichier
+    with open(reference_file, 'w') as f:
+        f.writelines(new_lines)
+
+    print(f"✅ Centres des spots mis à jour dans '{reference_file}'")
 
 def save_coordinates_to_file(x_min, x_max, y_min, y_max, filename='reference.txt'):
     """Enregistre les coordonnées xmin, xmax, ymin, ymax dans un fichier texte."""
@@ -38,17 +62,26 @@ def save_coordinates_to_file(x_min, x_max, y_min, y_max, filename='reference.txt
         file.write(f"y_max: {y_max}\n")
     print(f"✅ Coordonnées sauvegardées dans '{filename}'")
 
+def assign_coordinates_from_file(filename='reference.txt'):
+    """Lit les coordonnées à partir d'un fichier texte."""
+    coords = {}
+    try:
+        with open(filename, 'r') as file:
+            for line in file:
+                line = line.strip()
+                if ":" in line:
+                    key, val = line.split(":")
+                    coords[key.strip()] = int(val.strip())
+        return coords
+    except Exception as e:
+        print(f"❌ Erreur lors de la lecture des coordonnées : {e}")
+        return None
+
 def process_and_save_images(image_path):
-    """
-    Charge l'image de référence, détecte les spots lumineux et 
-    enregistre deux images :
-    - L'image originale 'image_reference.jpg'
-    - L'image zoomée et marquée 'image_reference_centre.jpg'
-    """
+    """Charge l'image de référence, détecte les spots lumineux et enregistre les images."""
     # Charger l'image
     image = cv2.imread(image_path)
-
-    # Vérifier si l'image a été chargée
+    
     if image is None:
         print("❌ Impossible de charger l'image.")
         return
@@ -59,15 +92,11 @@ def process_and_save_images(image_path):
     # Détecter les spots dans l'image
     spots_centers = detect_spots(gray_image)
 
-    # Vérifier si des centres ont été détectés
     if len(spots_centers) == 0:
         print("Aucun centre de spot détecté.")
         return
 
     # Trouver les coordonnées des spots
-    print("Centres détectés : ", np.array(spots_centers))
-
-    # Trouver la taille de la matrice de microlentilles
     x_min = np.min(spots_centers[:, 0]) - 50
     x_max = np.max(spots_centers[:, 0]) + 50
     y_min = np.min(spots_centers[:, 1]) - 50
@@ -87,22 +116,13 @@ def process_and_save_images(image_path):
 
     # Afficher l'image zoomée avec les centres détectés
     for center in spots_centers:
-        # Ajuster les coordonnées du centre pour l'image zoomée
         adjusted_center = (center[0] - x_min, center[1] - y_min)
-        # Remplacer le pixel correspondant à ce centre par du rouge
-        image_zoom[adjusted_center[1], adjusted_center[0]] = [0, 0, 255]  # [B, G, R] : couleur rouge
+        image_zoom[adjusted_center[1], adjusted_center[0]] = [0, 0, 255]  # Marque le centre en rouge
 
-    # Sauvegarder l'image originale (image_reference.jpg)
+    # Sauvegarder les images
     cv2.imwrite('image_reference.jpg', image)
-
-    # Sauvegarder l'image zoomée et marquée (image_reference_centre.jpg)
     cv2.imwrite('image_reference_centre.jpg', image_zoom)
 
     print(f"✅ Image originale sauvegardée sous 'image_reference.jpg'")
-    print(f"✅ Image zoomée avec centres détectés sauvegardée sous 'image_reference_centre.jpg'")
+    print(f"✅ Image zoomée sauvegardée sous 'image_reference_centre.jpg'")
 
-# Chemin de l'image de référence
-image_path = 'image_reference.jpg'
-
-# Traiter et sauvegarder les deux images
-process_and_save_images(image_path)
