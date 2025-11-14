@@ -29,18 +29,20 @@ def get_live_image():
         image = (image - np.min(image)) / (np.max(image) - np.min(image)) * 255
         image = np.clip(image, 0, 255).astype(np.uint8)
 
-        # Découpe du ROI si défini
-        if hasattr(camera, "roi"):
+        # Découpe du ROI si défini et non None
+        if hasattr(camera, "roi") and camera.roi is not None:
             x, y, w, h = camera.roi
             image = image[y:y+h, x:x+w]
 
         return image
+
     except Exception as e:
         print(f"❌ Erreur lors de la capture d'image : {e}")
         return None
     
 def capture_and_save_image():
     """Capture une image unique et l'enregistre, écrasant l'ancienne."""
+    reset_camera_roi()
     image = get_live_image()
     if image is not None:
         # Sauvegarde l'image avec le nom spécifié (écrase la précédente)
@@ -85,6 +87,15 @@ def set_camera_roi(x, y, width, height):
     # donc on mémorise la zone pour la découper au besoin.
     _camera.roi = (x, y, width, height)
     print(f"✅ ROI défini : x={x}, y={y}, w={width}, h={height}")
+
+def reset_camera_roi():
+    """Réinitialise le ROI pour capturer l'image complète."""
+    global _camera
+    if _camera is None:
+        _connect_to_camera()
+
+    _camera.roi = None   # <--- ROI désactivé
+    print("🔄 ROI réinitialisé : capture en pleine résolution.")
 
 
 def set_camera_exposure(exposure_us):
