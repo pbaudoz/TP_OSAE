@@ -1,0 +1,4 @@
+x_min: 279
+x_max: 530
+y_min: 97
+y_max: 347
