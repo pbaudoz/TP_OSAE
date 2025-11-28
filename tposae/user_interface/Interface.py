@@ -5,21 +5,24 @@ import math
 from PyQt5.QtWidgets import (
     QApplication, QWidget, QLabel, QPushButton, QCheckBox, QVBoxLayout, 
     QHBoxLayout, QLineEdit, QFrame, QGroupBox, QSizePolicy, 
-    QSlider, QSpinBox # Ajout de QSlider et QSpinBox
+    QSlider, QSpinBox
 )
 from PyQt5.QtGui import QImage, QPixmap, QPainter, QColor, QPen, QFont
 from PyQt5.QtCore import QTimer, Qt
 
+# NOTE: Assurez-vous que ces fonctions existent dans vos modules locaux
 from visualisation import get_live_image, set_camera_roi, set_camera_exposure, capture_and_save_image
-from Reference import process_and_save_images, assign_coordinates_from_file, read_grid_from_reference
+# IMPORT MIS À JOUR pour inclure read_grid_cells_from_reference
+from Reference import process_and_save_images, assign_coordinates_from_file, read_grid_from_reference, read_grid_cells_from_reference 
 
 
 class LiveReferenceWindow(QWidget):
     def __init__(self):
         super().__init__()
         self.setWindowTitle("TP OSAE - Interface de Visualisation et Référence")
-        self.setGeometry(100, 100, 1000, 650) # Taille initiale de la fenêtre
-        
+        # Ajuster la taille de la fenêtre si nécessaire pour accommoder la grande image de référence
+        self.setGeometry(100, 100, 1200, 800) # Augmentation de la largeur et hauteur
+
         self.setStyleSheet(self._get_qstyle())
 
         # --- Variables d'état et initialisation ---
@@ -34,13 +37,15 @@ class LiveReferenceWindow(QWidget):
             self.coords = {'x_min': 0, 'y_min': 0, 'x_max': 500, 'y_max': 500} 
 
         self.vertical_lines, self.horizontal_lines = read_grid_from_reference('reference.txt')
+        self.grid_cells = read_grid_cells_from_reference('reference.txt')
+        
         self.show_grid = False
         self.grid_pixmap = None
         self.LIVE_WIDTH = 500
         self.LIVE_HEIGHT = 500
         
         # Exposition de base en microsecondes (0.0002 s = 200 µs)
-        self.BASE_EXPOSURE_US = 200 # <-- Changé de 20000 à 200
+        self.BASE_EXPOSURE_US = 200 
         self.MAX_EXPOSURE_US = 1000000 # 1 seconde
         self.MIN_EXPOSURE_US = 10 # 10 microsecondes
 
@@ -158,7 +163,7 @@ class LiveReferenceWindow(QWidget):
         commands_layout = QVBoxLayout(commands_group)
         
         # Bouton Acquisition Référence
-        self.acquire_button = QPushButton("Acquérir Nouvelle Référence") # Retrait du "1."
+        self.acquire_button = QPushButton("Acquérir Nouvelle Référence")
         self.acquire_button.clicked.connect(self.acquire_new_reference_image)
         commands_layout.addWidget(self.acquire_button)
 
@@ -196,12 +201,18 @@ class LiveReferenceWindow(QWidget):
         ref_layout = QVBoxLayout(ref_group)
         
         self.ref_label = QLabel("Pas d'image de référence")
-        self.ref_label.setFixedSize(250, 250)
+        
+        # MODIFIÉ : Augmentation de la taille du QLabel pour l'image de référence
+        self.REF_DISPLAY_WIDTH = 600  # Par exemple, 600 pixels
+        self.REF_DISPLAY_HEIGHT = 600 # Et 600 pixels
+        self.ref_label.setFixedSize(self.REF_DISPLAY_WIDTH, self.REF_DISPLAY_HEIGHT) 
+        
         self.ref_label.setAlignment(Qt.AlignCenter)
-        self.ref_label.setScaledContents(True) # Pour le KeepAspectRatio de la référence
+        self.ref_label.setScaledContents(True) 
         ref_layout.addWidget(self.ref_label)
         
-        ref_group.setFixedWidth(300) # Fixer la largeur de la colonne de référence
+        # MODIFIÉ : Ajustement de la largeur du groupe pour accueillir le label plus grand
+        ref_group.setFixedWidth(self.REF_DISPLAY_WIDTH + 50) # + un peu de marge
 
         main_layout.addWidget(ref_group)
 
@@ -217,7 +228,10 @@ class LiveReferenceWindow(QWidget):
         self.update_live_image()
 
     def create_grid_pixmap(self, width, height):
-        """Crée le QPixmap de la grille avec la translation et le scaling (Anti-Crash inclus)."""
+        """
+        Crée le QPixmap de la grille avec la translation et le scaling. 
+        Patché pour inclure le dessin des croix pour les spots manquants.
+        """
         
         coords = assign_coordinates_from_file('reference.txt')
         if not coords:
@@ -241,9 +255,12 @@ class LiveReferenceWindow(QWidget):
         self.grid_pixmap.fill(QColor(0, 0, 0, 0))
 
         painter = QPainter(self.grid_pixmap)
-        pen = QPen(QColor(0, 255, 0, 200)) # Vert
-        pen.setWidth(1)
-        painter.setPen(pen)
+        
+        # 1. Dessin des lignes de grille (Vert)
+        pen_grid = QPen(QColor(0, 255, 0, 200)) # Vert
+        pen_grid.setWidth(1)
+        painter.setPen(pen_grid)
+
 
         def transform_and_draw_line(line):
             """Applique la transformation (Translation + Scaling) et dessine la ligne."""
@@ -254,7 +271,7 @@ class LiveReferenceWindow(QWidget):
             y2_scaled = (line[3] - y_min) * scale_y
             
             if math.isnan(x1_scaled) or math.isinf(x1_scaled) or math.isnan(y1_scaled) or math.isinf(y1_scaled):
-                 return 
+                return 
 
             painter.drawLine(int(x1_scaled), int(y1_scaled), int(x2_scaled), int(y2_scaled))
 
@@ -263,6 +280,26 @@ class LiveReferenceWindow(QWidget):
 
         for h in self.horizontal_lines:
             transform_and_draw_line(h)
+
+        # 2. Dessin des croix (Rouge) dans les cellules VIDES (PATCH NOUVEAU)
+        pen_cross = QPen(QColor(255, 0, 0, 200)) # Rouge
+        pen_cross.setWidth(2)
+        painter.setPen(pen_cross)
+        
+        for cell in self.grid_cells:
+            if not cell['has_spot']:
+                
+                # Coordonnées mises à l'échelle des bords de la cellule
+                x_min_scaled = (cell['x_min'] - x_min) * scale_x
+                y_min_scaled = (cell['y_min'] - y_min) * scale_y
+                x_max_scaled = (cell['x_max'] - x_min) * scale_x
+                y_max_scaled = (cell['y_max'] - y_min) * scale_y
+
+                # Ligne 1 : (coin supérieur gauche) -> (coin inférieur droit)
+                painter.drawLine(int(x_min_scaled), int(y_min_scaled), int(x_max_scaled), int(y_max_scaled))
+                
+                # Ligne 2 : (coin inférieur gauche) -> (coin supérieur droit)
+                painter.drawLine(int(x_min_scaled), int(y_max_scaled), int(x_max_scaled), int(y_min_scaled))
 
         painter.end()
 
@@ -289,31 +326,40 @@ class LiveReferenceWindow(QWidget):
 
             self.live_label.setPixmap(pixmap)
 
-    # --- Mise à jour de l'image de référence ---
+    # --- Mise à jour de l'image de référence (PATCHÉ pour agrandir) ---
     def update_reference_image(self):
-        ref_image = cv2.imread('image_reference_centre.jpg')
+        # Lit le fichier PNG sans perte
+        ref_image = cv2.imread('image_reference_centre.png')
         if ref_image is not None:
             if len(ref_image.shape) == 2:
                 ref_image = cv2.cvtColor(ref_image, cv2.COLOR_GRAY2BGR)
-            h, w, ch = ref_image.shape
+            
+            # MODIFIÉ : Redimensionne l'image AVANT de la convertir en QImage
+            # Utilisez INTER_LANCZOS4 pour une meilleure qualité d'agrandissement
+            ref_image_resized = cv2.resize(ref_image, 
+                                           (self.REF_DISPLAY_WIDTH, self.REF_DISPLAY_HEIGHT), 
+                                           interpolation=cv2.INTER_LANCZOS4)
+            
+            h, w, ch = ref_image_resized.shape
             bytes_per_line = ch * w
-            qt_image = QImage(ref_image.data, w, h, bytes_per_line, QImage.Format_BGR888)
+            qt_image = QImage(ref_image_resized.data, w, h, bytes_per_line, QImage.Format_BGR888)
             
             pixmap = QPixmap.fromImage(qt_image)
-            # KeepAspectRatio est préférable pour la référence
-            pixmap = pixmap.scaled(self.ref_label.size(), Qt.KeepAspectRatio, Qt.SmoothTransformation)
-            
+            # Puisque l'image a déjà été redimensionnée à la taille du label, 
+            # on peut directement la définir ou la rescaler sans modification.
             self.ref_label.setPixmap(pixmap)
 
-    # --- Acquisition d'une nouvelle image de référence ---
+    # --- Acquisition d'une nouvelle image de référence (inchangée pour les noms de fichiers) ---
     def acquire_new_reference_image(self):
         print("🔵 Acquisition d’une nouvelle image de référence...")
         self.acquire_button.setEnabled(False) # Désactiver pour éviter les doubles clics
         QApplication.processEvents() # Forcer la mise à jour de l'UI
         
         try:
-            capture_and_save_image()
-            process_and_save_images('image_reference.jpg')
+            # Assurez-vous que capture_and_save_image() enregistre en PNG
+            capture_and_save_image() 
+            # Passe le chemin du fichier PNG à process_and_save_images
+            process_and_save_images('image_reference.png')
             
             self.coords = assign_coordinates_from_file('reference.txt')
             if self.coords:
@@ -323,6 +369,9 @@ class LiveReferenceWindow(QWidget):
                 print(f"🎯 Nouveau ROI appliqué : {self.coords}")
                 
             self.vertical_lines, self.horizontal_lines = read_grid_from_reference('reference.txt')
+            # LECTURE DES NOUVELLES CELLULES
+            self.grid_cells = read_grid_cells_from_reference('reference.txt') 
+            
             self.create_grid_pixmap(self.live_label.width(), self.live_label.height())
             self.update_reference_image()
 
@@ -331,8 +380,7 @@ class LiveReferenceWindow(QWidget):
 
     # --- Mise à jour de l'exposition ---
     def update_exposure(self, value_us):
-        """Met à jour l'exposition de la caméra en microsecondes (µs).
-        La valeur 'value_us' est fournie directement par le QSpinBox."""
+        """Met à jour l'exposition de la caméra en microsecondes (µs)."""
         try:
             # La valeur 'value_us' vient directement du QSpinBox (en microsecondes)
             set_camera_exposure(value_us)
@@ -341,10 +389,8 @@ class LiveReferenceWindow(QWidget):
         except Exception as e:
             print(f"❌ Erreur exposition : {e}")
             
-    # --- Appliquer zoom ROI ---
+    # --- Appliquer zoom ROI (inchangée) ---
     def apply_zoom_roi(self):
-        # Cette fonction est conservée pour la compatibilité avec l'ancienne logique
-        # mais n'est plus liée à un bouton dans l'UI. 
         self.coords = assign_coordinates_from_file('reference.txt')
         if self.coords:
             set_camera_roi(self.coords['x_min'], self.coords['y_min'],
@@ -353,6 +399,8 @@ class LiveReferenceWindow(QWidget):
             print(f"🎯 ROI de Zoom appliqué : {self.coords}")
             
             self.vertical_lines, self.horizontal_lines = read_grid_from_reference('reference.txt')
+            # LECTURE DES CELLULES
+            self.grid_cells = read_grid_cells_from_reference('reference.txt') 
             self.create_grid_pixmap(self.live_label.width(), self.live_label.height())
 
 

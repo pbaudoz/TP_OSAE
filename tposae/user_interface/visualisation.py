@@ -7,7 +7,7 @@ import cv2
 HOST = "127.0.0.1"
 PORT = 2345
 NUM_EXPOSURES = 1
-IMAGE_PATH = "image_reference.jpg"
+IMAGE_PATH = "image_reference.png"
 
 # Connexion globale pour éviter de se connecter/déconnecter à chaque image
 _tb = None

@@ -1,59 +1,142 @@
 import cv2
 import numpy as np
-from scipy.ndimage import label, center_of_mass
+import math
+from scipy.ndimage import label, center_of_mass 
 
-# --- Détection des spots ---
+# --- Détection des spots (NOUVELLE VERSION: Labellisation/Centre de Masse) ---
 def detect_spots(image, threshold=0.12, min_area=10):
-    """Détecte les centres lumineux dans l'image en utilisant l'étiquetage et le Centre de Masse (CoM)"""
-    
-    # 1. Normalisation et seuillage binaire
-    # Votre méthode de normalisation actuelle est conservée
+    """
+    Détecte les centres lumineux dans l'image en utilisant la labellisation et le centre de masse
+    et crée des contours factices pour la compatibilité avec la visualisation.
+    """
     norm_image = (image - image.min()) / (image.max() - image.min())
     binary_image = (norm_image > threshold).astype(np.uint8)
-
-    # 2. Étiquetage des régions connectées
-    # 'label' identifie chaque groupe de pixels connectés (spots)
-    # L'image étiquetée est un tableau où chaque spot a une valeur entière unique (> 0)
+    
+    # Étape 1: Labellisation des régions (Scipy)
     labeled_image, num_features = label(binary_image)
     
     centers = []
-
-    # 3. Calcul du Centre de Masse pour chaque région (spot)
+    valid_contours = [] # Nous devons toujours retourner une liste de contours pour la visualisation
+    
+    # Itération sur chaque région labellisée
     for i in range(1, num_features + 1):
-        # Créer un masque booléen pour la région courante
-        region_mask = (labeled_image == i)
+        region = (labeled_image == i)
         
-        # Vérifier si la surface du spot est suffisante
-        if np.sum(region_mask) >= min_area:
-            # center_of_mass retourne (y, x) dans l'indexation NumPy
-            cy, cx = center_of_mass(region_mask)
+        if np.sum(region) >= min_area:
+            # Étape 2: Calcul du Centre de Masse (y, x)
+            cy, cx = center_of_mass(region) 
             
-            # On stocke sous forme (x, y) pour la cohérence avec OpenCV
-            centers.append((int(cx), int(cy)))
+            # center_of_mass retourne (y, x), nous le convertissons en (cx, cy) ou (x, y)
+            cx = int(round(cx)) 
+            cy = int(round(cy))
             
-    return np.array(centers)
+            centers.append((cx, cy))
+            
+            # Étape 3: Création d'un contour factice pour la compatibilité
+            region_uint8 = region.astype(np.uint8) * 255
+            
+            contours, _ = cv2.findContours(region_uint8, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+            
+            if contours:
+                biggest_contour = max(contours, key=cv2.contourArea)
+                valid_contours.append(biggest_contour)
 
-# --- Fonctions inchangées ---
-# ... (write_reference_file, assign_coordinates_from_file, compute_grid_from_centers, process_and_save_images, read_grid_from_reference)
-# Le reste de votre code (write_reference_file, assign_coordinates_from_file, compute_grid_from_centers, process_and_save_images, read_grid_from_reference)
-# n'a pas besoin d'être modifié car il utilise le résultat de 'detect_spots' (une liste de centres (x, y)).
+    # Note: On retourne les centres (x, y) et les contours correspondants
+    return np.array(centers), valid_contours
 
-# --- Écriture du fichier de référence ---
+# --- Calcul grille et cellules (inchangée) ---
+def compute_grid_and_cells(centers):
+    """Calcule les lignes de la grille et détermine l'état (spot présent/absent) de chaque cellule."""
+    if len(centers) < 4:
+        return [], [], [] 
+
+    y_median = np.median(centers[:,1])
+    x_median = np.median(centers[:,0])
+    line_central = centers[np.abs(centers[:,1]-y_median) < 5]
+    line_central = line_central[np.argsort(line_central[:,0])]
+    col_central = centers[np.abs(centers[:,0]-x_median) < 5]
+    col_central = col_central[np.argsort(col_central[:,1])]
+
+    if len(line_central) < 2 or len(col_central) < 2:
+        return [], [], []
+
+    dx = np.median(np.diff(line_central[:,0]))
+    dy = np.median(np.diff(col_central[:,1]))
+
+    if dx == 0 or dy == 0:
+        return [], [], []
+
+    y_top, y_bottom = col_central[0,1]-dy/2, col_central[-1,1]+dy/2
+    x_left, x_right = line_central[0,0]-dx/2, line_central[-1,0]+dx/2
+
+    vertical_x_coords = [(line_central[i,0] + line_central[i+1,0]) / 2 for i in range(len(line_central)-1)]
+    vertical_x_coords.insert(0, x_left)
+    vertical_x_coords.append(x_right)
+
+    vertical_lines = [
+        (x_coord, y_top, x_coord, y_bottom)
+        for x_coord in vertical_x_coords
+    ]
+    
+    horizontal_y_coords = [(col_central[i,1] + col_central[i+1,1]) / 2 for i in range(len(col_central)-1)]
+    horizontal_y_coords.insert(0, y_top)
+    horizontal_y_coords.append(y_bottom)
+
+    horizontal_lines = [
+        (x_left, y_coord, x_right, y_coord)
+        for y_coord in horizontal_y_coords
+    ]
+    
+    cells = []
+    centers_tuple = [tuple(c) for c in centers]
+    
+    tolerance = max(dx, dy) / 4 
+
+    for j in range(len(horizontal_y_coords) - 1):
+        for i in range(len(vertical_x_coords) - 1):
+            x_start = vertical_x_coords[i]
+            x_end = vertical_x_coords[i+1]
+            y_start = horizontal_y_coords[j]
+            y_end = horizontal_y_coords[j+1]
+            
+            center_x = (x_start + x_end) / 2
+            center_y = (y_start + y_end) / 2
+            
+            has_spot = False
+
+            for cx, cy in centers_tuple:
+                distance = np.sqrt((cx - center_x)**2 + (cy - center_y)**2)
+                if distance < tolerance:
+                    has_spot = True
+                    break 
+                    
+            cells.append({
+                'cx': center_x, 
+                'cy': center_y, 
+                'has_spot': has_spot,
+                'x_min': x_start,
+                'y_min': y_start,
+                'x_max': x_end,
+                'y_max': y_end
+            })
+
+    return vertical_lines, horizontal_lines, cells
+
+# --- Écriture du fichier de référence (inchangée) ---
 def write_reference_file(reference_file, x_min, x_max, y_min, y_max,
-                         centers, vertical_lines, horizontal_lines):
+                            centers, vertical_lines, horizontal_lines, cells):
+    """Écrit les coordonnées du ROI, des centres et de la grille dans le fichier de référence."""
     lines = []
     lines.append(f"x_min: {x_min}\n")
     lines.append(f"x_max: {x_max}\n")
     lines.append(f"y_min: {y_min}\n")
     lines.append(f"y_max: {y_max}\n\n")
 
-    # Centres des spots
     lines.append("#BEGIN centres des spots\n")
     for c in centers:
         lines.append(f"{c[0]},{c[1]}\n")
     lines.append("#END centres des spots\n\n")
 
-    # Grille
     lines.append("#BEGIN grille\n")
     lines.append("# Lignes verticales : x1,y1,x2,y2\n")
     for v in vertical_lines:
@@ -61,14 +144,63 @@ def write_reference_file(reference_file, x_min, x_max, y_min, y_max,
     lines.append("# Lignes horizontales : x1,y1,x2,y2\n")
     for h in horizontal_lines:
         lines.append(f"{h[0]},{h[1]},{h[2]},{h[3]}\n")
-    lines.append("#END grille\n")
+    lines.append("#END grille\n\n")
+    
+    lines.append("#BEGIN cellules de grille\n")
+    lines.append("# Format : cx,cy,has_spot(0/1),x_min,y_min,x_max,y_max\n")
+    for c in cells:
+        lines.append(f"{c['cx']},{c['cy']},{int(c['has_spot'])},{c['x_min']},{c['y_min']},{c['x_max']},{c['y_max']}\n")
+    lines.append("#END cellules de grille\n")
 
     with open(reference_file, 'w') as f:
         f.writelines(lines)
     print("📄 reference.txt mis à jour proprement")
 
-# --- Lecture ROI ---
+# --- Lecture des fonctions (inchangée) ---
+def read_grid_cells_from_reference(filename='reference.txt'):
+    """Lit les données des cellules de grille depuis le fichier de référence."""
+    cells = []
+    try:
+        with open(filename, 'r') as f:
+            lines = f.readlines()
+
+        in_cells_section = False
+        
+        for line in lines:
+            line = line.strip()
+
+            if line == "#BEGIN cellules de grille":
+                in_cells_section = True
+                continue
+            if line == "#END cellules de grille":
+                break
+
+            if not in_cells_section or line.startswith("#") or line == "":
+                continue
+
+            try:
+                parts = [float(x) for x in line.split(",")]
+                if len(parts) == 7:
+                    cells.append({
+                        'cx': parts[0], 
+                        'cy': parts[1], 
+                        'has_spot': bool(int(parts[2])),
+                        'x_min': parts[3],
+                        'y_min': parts[4],
+                        'x_max': parts[5],
+                        'y_max': parts[6]
+                    })
+            except ValueError:
+                continue
+
+        return cells
+
+    except Exception as e:
+        print(f"❌ Erreur lecture cellules : {e}") 
+        return []
+
 def assign_coordinates_from_file(filename='reference.txt'):
+    """Lit les coordonnées x_min, x_max, y_min, y_max du fichier de référence."""
     coords = {}
     try:
         with open(filename, 'r') as file:
@@ -81,82 +213,15 @@ def assign_coordinates_from_file(filename='reference.txt'):
                 key, val = line.split(":")
                 if val.strip().isdigit():
                     coords[key.strip()] = int(val.strip())
-        return coords
+            return coords
     except Exception as e:
         print(f"❌ Erreur lors de la lecture des coordonnées : {e}")
         return None
 
-# --- Calcul grille ---
-def compute_grid_from_centers(centers):
-    if len(centers) < 4:
-        return [], []
-    y_median = np.median(centers[:,1])
-    x_median = np.median(centers[:,0])
-    line_central = centers[np.abs(centers[:,1]-y_median) < 5]
-    line_central = line_central[np.argsort(line_central[:,0])]
-    col_central = centers[np.abs(centers[:,0]-x_median) < 5]
-    col_central = col_central[np.argsort(col_central[:,1])]
-    dx = np.median(np.diff(line_central[:,0]))
-    dy = np.median(np.diff(col_central[:,1]))
-    y_top, y_bottom = col_central[0,1]-dy/2, col_central[-1,1]+dy/2
-    x_left, x_right = line_central[0,0]-dx/2, line_central[-1,0]+dx/2
-    vertical_lines = [
-        ((line_central[i,0]+line_central[i+1,0])/2, y_top,
-         (line_central[i,0]+line_central[i+1,0])/2, y_bottom)
-        for i in range(len(line_central)-1)
-    ]
-    vertical_lines.insert(0, (x_left, y_top, x_left, y_bottom))
-    vertical_lines.append((x_right, y_top, x_right, y_bottom))
-    horizontal_lines = [
-        (x_left, (col_central[i,1]+col_central[i+1,1])/2,
-         x_right, (col_central[i,1]+col_central[i+1,1])/2)
-        for i in range(len(col_central)-1)
-    ]
-    horizontal_lines.insert(0, (x_left, y_top, x_right, y_top))
-    horizontal_lines.append((x_left, y_bottom, x_right, y_bottom))
-    return vertical_lines, horizontal_lines
-
-# --- Traitement et sauvegarde image ---
-def process_and_save_images(image_path):
-    image = cv2.imread(image_path)
-    if image is None:
-        print("❌ Impossible de charger l'image.")
-        return
-
-    gray_image = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
-    spots_centers = detect_spots(gray_image)
-    if len(spots_centers) == 0:
-        print("Aucun centre de spot détecté.")
-        return
-
-    # Calcul ROI
-    x_min = max(0, np.min(spots_centers[:, 0]) - 50)
-    x_max = min(image.shape[1], np.max(spots_centers[:, 0]) + 50)
-    y_min = max(0, np.min(spots_centers[:, 1]) - 50)
-    y_max = min(image.shape[0], np.max(spots_centers[:, 1]) + 50)
-
-    # Calcul grille (pour référence)
-    vertical_lines, horizontal_lines = compute_grid_from_centers(spots_centers)
-    write_reference_file("reference.txt", x_min, x_max, y_min, y_max,
-                         spots_centers, vertical_lines, horizontal_lines)
-
-    # Création image zoomée avec centres en rouge
-    image_zoom = image[y_min:y_max, x_min:x_max].copy()
-    for center in spots_centers:
-        adjusted_center = (center[0] - x_min, center[1] - y_min)
-        cv2.circle(image_zoom, adjusted_center, radius=3, color=(0, 0, 255), thickness=-1)
-
-    # Sauvegarde
-    cv2.imwrite('image_reference.jpg', image)
-    cv2.imwrite('image_reference_centre.jpg', image_zoom)
-
-    print(f"✅ Image originale sauvegardée sous 'image_reference.jpg'")
-    print(f"✅ Image zoomée avec centres sauvegardée sous 'image_reference_centre.jpg'")
-
 def read_grid_from_reference(filename='reference.txt'):
+    """Lit les lignes de la grille (verticales et horizontales) depuis le fichier de référence."""
     vertical_lines = []
     horizontal_lines = []
-
     try:
         with open(filename, 'r') as f:
             lines = f.readlines()
@@ -168,18 +233,15 @@ def read_grid_from_reference(filename='reference.txt'):
         for line in lines:
             line = line.strip()
 
-            # Activer/désactiver sections
             if line == "#BEGIN grille":
                 in_grid = True
                 continue
             if line == "#END grille":
                 break
 
-            # Sauter tout tant qu'on n'est pas dans la section grille
             if not in_grid:
                 continue
 
-            # Gestion des sous-sections
             if line.startswith("# Lignes verticales"):
                 reading_v = True
                 reading_h = False
@@ -189,11 +251,9 @@ def read_grid_from_reference(filename='reference.txt'):
                 reading_v = False
                 continue
 
-            # Ignorer commentaires ou lignes vides
             if line.startswith("#") or line == "":
                 continue
 
-            # Convertir uniquement les lignes "x1,y1,x2,y2"
             try:
                 parts = [float(x) for x in line.split(",")]
                 if len(parts) != 4:
@@ -205,7 +265,6 @@ def read_grid_from_reference(filename='reference.txt'):
                     horizontal_lines.append(tuple(parts))
 
             except ValueError:
-                # Ligne non convertible → on ignore
                 continue
 
         return vertical_lines, horizontal_lines
@@ -213,3 +272,71 @@ def read_grid_from_reference(filename='reference.txt'):
     except Exception as e:
         print(f"❌ Erreur lecture grille : {e}")
         return [], []
+        
+# --- Traitement et sauvegarde image (PATCHÉ pour pixel 1x1) ---
+def process_and_save_images(image_path):
+    print(f"🔬 Début du traitement de l'image pour la référence : {image_path}")
+    
+    image = cv2.imread(image_path)
+    if image is None:
+        print(f"❌ Impossible de charger l'image à {image_path}. Vérifiez le chemin et l'extension.")
+        return
+
+    # Gestion des images à 1 canal (gris) ou 3 canaux (BGR)
+    if len(image.shape) == 3:
+        gray_image = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
+    elif len(image.shape) == 2:
+        gray_image = image
+    else:
+        print("❌ Format d'image non pris en charge.")
+        return
+        
+    spots_centers, spots_contours = detect_spots(gray_image) 
+    
+    if len(spots_centers) == 0:
+        print("Aucun centre de spot détecté. 🛑 Arrêt du traitement.")
+        return
+
+    # Calcul du ROI de zoom autour des spots
+    spots_centers_np = np.array(spots_centers)
+    x_min = max(0, np.min(spots_centers_np[:, 0]) - 50)
+    x_max = min(image.shape[1], np.max(spots_centers_np[:, 0]) + 50)
+    y_min = max(0, np.min(spots_centers_np[:, 1]) - 50)
+    y_max = min(image.shape[0], np.max(spots_centers_np[:, 1]) + 50)
+    
+    vertical_lines, horizontal_lines, cells = compute_grid_and_cells(spots_centers_np) 
+    
+    write_reference_file("reference.txt", x_min, x_max, y_min, y_max,
+                            spots_centers, vertical_lines, horizontal_lines, cells)
+
+    image_zoom = image[y_min:y_max, x_min:x_max].copy()
+    
+    # Dimensions de l'image zoomée
+    H_zoom, W_zoom = image_zoom.shape[:2]
+    # Couleur BGR (Bleu) pour OpenCV
+    BLUE_PIXEL = [255, 0, 0] 
+    
+    for i, center in enumerate(spots_centers):
+        contour = spots_contours[i]
+        
+        # Ajustement des coordonnées au ROI zoomé
+        contour_adj = contour - [x_min, y_min]
+        x_center_adj = center[0] - x_min
+        y_center_adj = center[1] - y_min
+        
+        # A. Dessiner le contour non rempli en rouge (épaisseur 1)
+        cv2.drawContours(image_zoom, [contour_adj], -1, (0, 0, 255), 1) 
+
+        # B. DESSINER LE CENTRE DE MASSE EN TANT QUE 1 PIXEL BLEU
+        # On utilise l'indexation directe du tableau NumPy pour garantir un point de 1 pixel
+        if 0 <= y_center_adj < H_zoom and 0 <= x_center_adj < W_zoom:
+            image_zoom[y_center_adj, x_center_adj] = BLUE_PIXEL
+            
+    # Sauvegarde des images en PNG
+    cv2.imwrite('image_reference.png', image)
+    
+    # SAUVEGARDE DE L'IMAGE CENTRÉE
+    cv2.imwrite('image_reference_centre.png', image_zoom)
+
+    print(f"✅ Image originale sauvegardée sous 'image_reference.png'")
+    print(f"✅ Image zoomée avec contours rouges (fins) et centre bleu (1 pixel) sauvegardée sous 'image_reference_centre.png' (Format sans perte)")
