@@ -2,6 +2,7 @@ import os
 import numpy as np
 from catkit2.testbed import TestbedProxy
 import cv2
+from Reference import detect_spots
 
 # === PARAMÈTRES ===
 HOST = "127.0.0.1"
@@ -40,16 +41,60 @@ def get_live_image():
         print(f"❌ Erreur lors de la capture d'image : {e}")
         return None
     
-def capture_and_save_image():
-    """Capture une image unique et l'enregistre, écrasant l'ancienne."""
+def capture_and_save_image(num_acquisitions=500):
+    """
+    Capture et moyenne un nombre spécifié d'images avant de sauvegarder le résultat.
+    
+    :param num_acquisitions: Le nombre d'images à capturer et moyenner.
+    """
     reset_camera_roi()
-    image = get_live_image()
-    if image is not None:
-        # Sauvegarde l'image avec le nom spécifié (écrase la précédente)
-        cv2.imwrite(IMAGE_PATH, image)
-        print(f"✅ Image sauvegardée sous {IMAGE_PATH}")
+    
+    # 1. Initialisation
+    total_image_sum = None
+    successful_captures = 0
+    
+    print(f"🔄 Début de la capture de {num_acquisitions} images pour la moyenne...")
+
+    # 2. Boucle d'Acquisition
+    for i in range(num_acquisitions):
+        image = get_live_image()
+        
+        if image is not None:
+            # Assurez-vous que l'image est un tableau NumPy
+            image_np = np.asarray(image)
+            
+            # Convertir l'image en float64 pour éviter l'overflow lors de la somme
+            # et pour permettre la division finale non entière.
+            current_image_float = image_np.astype(np.float64) 
+            
+            if total_image_sum is None:
+                # Initialise la somme avec la première image
+                total_image_sum = current_image_float
+            else:
+                # Ajoute l'image actuelle à la somme totale
+                total_image_sum += current_image_float
+            
+            successful_captures += 1
+        else:
+            print(f"⚠️ Avertissement : Acquisition {i+1} échouée. Tentative suivante...")
+            # On pourrait ajouter ici un mécanisme de pause ou de réessai si nécessaire
+
+    # ---
+    
+    # 3. Calcul de la Moyenne et Sauvegarde
+    if successful_captures > 0:
+        # Calcul de la moyenne par division par le nombre d'acquisitions réussies
+        average_image_float = total_image_sum / successful_captures
+        
+        # Convertir le résultat en type entier non signé 8 bits (le format standard des images)
+        # On utilise np.clip pour s'assurer que les valeurs restent entre 0 et 255.
+        average_image_uint8 = np.clip(average_image_float, 0, 255).astype(np.uint8)
+        
+        # Sauvegarde l'image moyennée
+        cv2.imwrite(IMAGE_PATH, average_image_uint8)
+        print(f"✅ Moyenne de {successful_captures} images calculée et sauvegardée sous {IMAGE_PATH}")
     else:
-        print("❌ Aucune image capturée pour sauvegarde.")
+        print("❌ Aucune image capturée avec succès. Impossible de calculer la moyenne.")
 
 def show_live():
     """Affiche la caméra en temps réel avec possibilité de fermer avec la croix."""

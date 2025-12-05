@@ -5,56 +5,94 @@ import math
 from PyQt5.QtWidgets import (
     QApplication, QWidget, QLabel, QPushButton, QCheckBox, QVBoxLayout, 
     QHBoxLayout, QLineEdit, QFrame, QGroupBox, QSizePolicy, 
-    QSlider, QSpinBox
+    QSlider, QSpinBox, QTextEdit 
 )
 from PyQt5.QtGui import QImage, QPixmap, QPainter, QColor, QPen, QFont
-from PyQt5.QtCore import QTimer, Qt
+from PyQt5.QtCore import QTimer, Qt, QObject, pyqtSignal 
 
 # NOTE: Assurez-vous que ces fonctions existent dans vos modules locaux
 from visualisation import get_live_image, set_camera_roi, set_camera_exposure, capture_and_save_image
-# IMPORT MIS À JOUR pour inclure read_grid_cells_from_reference
-from Reference import process_and_save_images, assign_coordinates_from_file, read_grid_from_reference, read_grid_cells_from_reference 
+from Reference import detect_spots, process_and_save_images, assign_coordinates_from_file, read_grid_from_reference, read_grid_cells_from_reference 
+from Vecteur_spots import compute_cells_from_grid_ref, compare_grid_cells_and_compute_vectors
+
+# --- NOUVELLE CLASSE POUR LA JOURNALISATION ---
+class LogHandler(QObject):
+    """
+    Gestionnaire qui redirige les sorties de sys.stdout vers un signal PyQt.
+    """
+    new_text = pyqtSignal(str)
+
+    def write(self, text):
+        """Méthode appelée par sys.stdout.write()."""
+        # Ignorer les lignes vides, y compris les sauts de ligne isolés
+        if text.strip() or text == '\n':
+            self.new_text.emit(text)
+
+    def flush(self):
+        """Méthode requise par l'interface de fichier, mais ne fait rien ici."""
+        pass
+# --- FIN CLASSE LOGHANDLER ---
 
 
 class LiveReferenceWindow(QWidget):
     def __init__(self):
         super().__init__()
         self.setWindowTitle("TP OSAE - Interface de Visualisation et Référence")
-        # Ajuster la taille de la fenêtre si nécessaire pour accommoder la grande image de référence
-        self.setGeometry(100, 100, 1200, 800) # Augmentation de la largeur et hauteur
+        self.setGeometry(100, 100, 1200, 800) 
 
         self.setStyleSheet(self._get_qstyle())
 
-        # --- Variables d'état et initialisation ---
+        # --- Variables de TAILLE et d'ÉTAT ---
+        
+        # Dimensions de la vidéo live
+        self.LIVE_WIDTH = 500
+        self.LIVE_HEIGHT = 500
+        
+        # Constantes d'Exposition
+        self.BASE_EXPOSURE_US = 200 
+        self.MAX_EXPOSURE_US = 1000000 
+        self.MIN_EXPOSURE_US = 10
+        
+        # État de la vidéo
+        self.is_paused = False
+        
+        # État des Vecteurs
+        self.show_vectors = False 
+        self.current_vectors = [] 
+        # NOUVEAU : Facteur de mise à l'échelle des vecteurs
+        self.vector_scale_factor = 1.0 # Par défaut à 1
+        
+        # -----------------------------------------------------------------------------
+        
         self.coords = assign_coordinates_from_file('reference.txt')
+        
+        # Initialisation nécessaire pour _setup_ui et _setup_logging
+        self.status_log = None 
+        self.log_handler = None 
+
+        self._setup_ui() 
+        self._setup_logging() 
+
         if self.coords:
-            # Initialiser le ROI de la caméra
+            # Initialiser le ROI de la caméra 
             set_camera_roi(self.coords['x_min'], self.coords['y_min'],
                            self.coords['x_max'] - self.coords['x_min'],
                            self.coords['y_max'] - self.coords['y_min'])
             print(f"✅ ROI défini : {self.coords}")
         else:
             self.coords = {'x_min': 0, 'y_min': 0, 'x_max': 500, 'y_max': 500} 
+            print("❌ Pas de coordonnées de référence trouvées. Utilisation du ROI par défaut.")
 
         self.vertical_lines, self.horizontal_lines = read_grid_from_reference('reference.txt')
         self.grid_cells = read_grid_cells_from_reference('reference.txt')
         
         self.show_grid = False
         self.grid_pixmap = None
-        self.LIVE_WIDTH = 500
-        self.LIVE_HEIGHT = 500
         
-        # Exposition de base en microsecondes (0.0002 s = 200 µs)
-        self.BASE_EXPOSURE_US = 200 
-        self.MAX_EXPOSURE_US = 1000000 # 1 seconde
-        self.MIN_EXPOSURE_US = 10 # 10 microsecondes
-
-        # --- Configuration de l'UI ---
-        self._setup_ui()
-
         # --- Initialisation des éléments graphiques ---
         self.create_grid_pixmap(self.LIVE_WIDTH, self.LIVE_HEIGHT)
-        self._init_exposure_slider() # Initialisation du slider
+        self._init_exposure_slider() 
+        self._init_vector_scale_slider() # NOUVEAU : Initialisation du slider de vecteur
 
         # --- Démarrage des Timers ---
         self.timer = QTimer()
@@ -109,6 +147,18 @@ class LiveReferenceWindow(QWidget):
             QPushButton:hover {
                 background-color: #45a049;
             }
+            QPushButton#pause_button {
+                background-color: #FF9800; /* Orange pour Pause */
+            }
+            QPushButton#pause_button:hover {
+                background-color: #F57C00; 
+            }
+            QPushButton#play_button {
+                background-color: #2196F3; /* Bleu pour Lecture */
+            }
+            QPushButton#play_button:hover {
+                background-color: #1976D2; 
+            }
             QLineEdit, QSpinBox {
                 border: 1px solid #5a5a5a;
                 padding: 5px;
@@ -133,6 +183,13 @@ class LiveReferenceWindow(QWidget):
                 margin: -5px 0;
                 border-radius: 9px;
             }
+            QTextEdit { /* Style pour la boîte de log */
+                background-color: #1e1e1e;
+                color: #b0b0b0;
+                border: 1px solid #5a5a5a;
+                border-radius: 3px;
+                padding: 5px;
+            }
         """
 
     def _setup_ui(self):
@@ -147,14 +204,30 @@ class LiveReferenceWindow(QWidget):
         live_group_layout = QVBoxLayout(live_group)
         
         self.live_label = QLabel()
-        self.live_label.setObjectName("live_display") # Utiliser pour le style CSS
+        self.live_label.setObjectName("live_display") 
         self.live_label.setFixedSize(self.LIVE_WIDTH, self.LIVE_HEIGHT) 
         self.live_label.setAlignment(Qt.AlignCenter)
         live_group_layout.addWidget(self.live_label)
 
+        # Ligne de commandes de visualisation
+        viz_hbox = QHBoxLayout()
+
+        # Bouton Pause/Lecture
+        self.pause_button = QPushButton("Pause")
+        self.pause_button.setObjectName("pause_button")
+        self.pause_button.clicked.connect(self.toggle_live_video)
+        viz_hbox.addWidget(self.pause_button)
+
         self.show_grid_checkbox = QCheckBox("Afficher la grille de référence")
         self.show_grid_checkbox.stateChanged.connect(self.toggle_grid)
-        live_group_layout.addWidget(self.show_grid_checkbox)
+        viz_hbox.addWidget(self.show_grid_checkbox)
+
+        # Checkbox pour l'affichage des vecteurs
+        self.show_vectors_checkbox = QCheckBox("Afficher les vecteurs (Live)")
+        self.show_vectors_checkbox.stateChanged.connect(self.toggle_vectors)
+        viz_hbox.addWidget(self.show_vectors_checkbox)
+
+        live_group_layout.addLayout(viz_hbox)
 
         live_commands_col.addWidget(live_group)
         
@@ -171,66 +244,135 @@ class LiveReferenceWindow(QWidget):
         exposure_group = QGroupBox("Exposition")
         exposure_group_layout = QVBoxLayout(exposure_group)
         
-        # Affichage de la valeur en microsecondes (µs)
         self.exposure_display = QSpinBox()
         self.exposure_display.setSuffix(" µs")
-        self.exposure_display.setRange(self.MIN_EXPOSURE_US, self.MAX_EXPOSURE_US)
-        self.exposure_display.setSingleStep(100) # Pas de 100 µs
+        self.exposure_display.setRange(self.MIN_EXPOSURE_US, self.MAX_EXPOSURE_US) 
+        self.exposure_display.setSingleStep(100) 
         
         self.exposure_slider = QSlider(Qt.Horizontal)
         self.exposure_slider.setRange(self.MIN_EXPOSURE_US, self.MAX_EXPOSURE_US)
         
-        # Connexion mutuelle : slider -> spinbox, spinbox -> slider
         self.exposure_slider.valueChanged.connect(self.exposure_display.setValue)
         self.exposure_display.valueChanged.connect(self.exposure_slider.setValue)
-        # La mise à jour de l'exposition de la caméra se fait dès que la valeur change (via spinbox)
         self.exposure_display.valueChanged.connect(self.update_exposure) 
 
         exposure_group_layout.addWidget(self.exposure_display)
         exposure_group_layout.addWidget(self.exposure_slider)
         commands_layout.addWidget(exposure_group)
         
+        # NOUVEAU : Contrôle du Facteur de Mise à l'Échelle des Vecteurs
+        vector_scale_group = QGroupBox("Échelle des Vecteurs")
+        vector_scale_layout = QVBoxLayout(vector_scale_group)
+        
+        self.vector_scale_display = QDoubleSpinBox()
+        self.vector_scale_display.setPrefix("x ")
+        self.vector_scale_display.setRange(1.0, 10.0) # Par exemple, de 1x à 10x
+        self.vector_scale_display.setSingleStep(0.5) 
+        self.vector_scale_display.setValue(self.vector_scale_factor) # Valeur par défaut 1.0
+        
+        self.vector_scale_slider = QSlider(Qt.Horizontal)
+        # On utilise une astuce : le slider travaille avec des entiers (10-100), qu'on divise par 10.
+        self.vector_scale_slider.setRange(10, 100) 
+        self.vector_scale_slider.setValue(int(self.vector_scale_factor * 10))
+
+        self.vector_scale_slider.valueChanged.connect(self._update_vector_scale_from_slider)
+        self.vector_scale_display.valueChanged.connect(self._update_vector_scale_from_spinbox)
+        
+        vector_scale_layout.addWidget(self.vector_scale_display)
+        vector_scale_layout.addWidget(self.vector_scale_slider)
+        commands_layout.addWidget(vector_scale_group)
+        
         live_commands_col.addWidget(commands_group)
-        live_commands_col.addStretch(1) # Pousser les éléments vers le haut
+        live_commands_col.addStretch(1) 
 
         main_layout.addLayout(live_commands_col)
 
-        # --- Colonne 2 : Image de Référence (à Droite) ---
-        
+        # --- Colonne 2 : Image de Référence et Log Box (à Droite) ---
+        ref_log_col = QVBoxLayout() 
+
+        # 1. Groupe Image de Référence
         ref_group = QGroupBox("Image de Référence Détectée")
         ref_layout = QVBoxLayout(ref_group)
         
         self.ref_label = QLabel("Pas d'image de référence")
         
-        # MODIFIÉ : Augmentation de la taille du QLabel pour l'image de référence
-        self.REF_DISPLAY_WIDTH = 600  # Par exemple, 600 pixels
-        self.REF_DISPLAY_HEIGHT = 600 # Et 600 pixels
+        self.REF_DISPLAY_WIDTH = 600
+        self.REF_DISPLAY_HEIGHT = 600
         self.ref_label.setFixedSize(self.REF_DISPLAY_WIDTH, self.REF_DISPLAY_HEIGHT) 
         
         self.ref_label.setAlignment(Qt.AlignCenter)
         self.ref_label.setScaledContents(True) 
         ref_layout.addWidget(self.ref_label)
         
-        # MODIFIÉ : Ajustement de la largeur du groupe pour accueillir le label plus grand
-        ref_group.setFixedWidth(self.REF_DISPLAY_WIDTH + 50) # + un peu de marge
+        ref_group.setFixedWidth(self.REF_DISPLAY_WIDTH + 50) 
+        ref_log_col.addWidget(ref_group)
 
-        main_layout.addWidget(ref_group)
+        # 2. Groupe Log Box
+        log_group = QGroupBox("Status/Journalisation")
+        log_layout = QVBoxLayout(log_group)
+        
+        self.status_log = QTextEdit()
+        self.status_log.setReadOnly(True) 
+        self.status_log.setFont(QFont("Monospace", 8))
+        self.status_log.setMaximumHeight(200) 
+        
+        log_layout.addWidget(self.status_log)
+        ref_log_col.addWidget(log_group)
+        
+        ref_log_col.addStretch(1) 
+        
+        main_layout.addLayout(ref_log_col)
+        
+    # --- MÉTHODE DE JOURNALISATION ---
+    def _setup_logging(self):
+        """Redirige sys.stdout vers le QTextEdit."""
+        self.log_handler = LogHandler()
+        self.log_handler.new_text.connect(self._append_to_log)
+        sys.stdout = self.log_handler
+
+    def _append_to_log(self, text):
+        """Ajoute le texte reçu par le signal au QTextEdit."""
+        self.status_log.insertPlainText(text)
+        if not text.endswith('\n'):
+            self.status_log.insertPlainText('\n')
+        self.status_log.ensureCursorVisible()
+    # --- FIN MÉTHODES DE LOGGING ---
+
 
     def _init_exposure_slider(self):
         """Initialise le slider et la valeur d'exposition."""
-        # Fixer la valeur initiale (0.0002 s = 200 µs)
         self.exposure_slider.setValue(self.BASE_EXPOSURE_US)
-        # Ceci va automatiquement déclencher self.update_exposure() via la connexion
+        
+    def _init_vector_scale_slider(self):
+        """Initialise le slider du facteur multiplicateur des vecteurs."""
+        self.vector_scale_slider.setValue(int(self.vector_scale_factor * 10))
+        
+    def _update_vector_scale_from_slider(self, value):
+        """Met à jour le facteur de mise à l'échelle à partir du slider."""
+        new_scale = value / 10.0
+        self.vector_scale_factor = new_scale
+        self.vector_scale_display.setValue(new_scale) # Met à jour le SpinBox
+        self.update_live_image() # Forcer la mise à jour pour re-dessiner les vecteurs
+        print(f"Échelle des vecteurs réglée sur {self.vector_scale_factor}x")
 
-    # --- Logique de la Grille ---
+    def _update_vector_scale_from_spinbox(self, value):
+        """Met à jour le facteur de mise à l'échelle à partir du spinbox."""
+        self.vector_scale_factor = value
+        self.vector_scale_slider.setValue(int(value * 10)) # Met à jour le Slider
+        self.update_live_image()
+        
+    # --- Logique de la Grille et Vecteurs ---
     def toggle_grid(self):
         self.show_grid = self.show_grid_checkbox.isChecked()
+        self.update_live_image()
+        
+    def toggle_vectors(self): 
+        self.show_vectors = self.show_vectors_checkbox.isChecked()
         self.update_live_image()
 
     def create_grid_pixmap(self, width, height):
         """
         Crée le QPixmap de la grille avec la translation et le scaling. 
-        Patché pour inclure le dessin des croix pour les spots manquants.
         """
         
         coords = assign_coordinates_from_file('reference.txt')
@@ -242,14 +384,14 @@ class LiveReferenceWindow(QWidget):
         roi_width = coords['x_max'] - x_min
         roi_height = coords['y_max'] - y_min
         
-        # VÉRIFICATION ANTI-CRASH
         if roi_width <= 0 or roi_height <= 0:
             print("❌ AVERTISSEMENT GRILLE : Largeur/hauteur ROI nulle ou invalide. La grille ne sera pas affichée.")
             self.grid_pixmap = None
             return
 
-        scale_x = width / roi_width
-        scale_y = height / roi_height
+        # Calcul des facteurs d'échelle
+        self.scale_x = width / roi_width
+        self.scale_y = height / roi_height
 
         self.grid_pixmap = QPixmap(width, height)
         self.grid_pixmap.fill(QColor(0, 0, 0, 0))
@@ -265,10 +407,10 @@ class LiveReferenceWindow(QWidget):
         def transform_and_draw_line(line):
             """Applique la transformation (Translation + Scaling) et dessine la ligne."""
             
-            x1_scaled = (line[0] - x_min) * scale_x
-            y1_scaled = (line[1] - y_min) * scale_y
-            x2_scaled = (line[2] - x_min) * scale_x
-            y2_scaled = (line[3] - y_min) * scale_y
+            x1_scaled = (line[0] - x_min) * self.scale_x 
+            y1_scaled = (line[1] - y_min) * self.scale_y 
+            x2_scaled = (line[2] - x_min) * self.scale_x
+            y2_scaled = (line[3] - y_min) * self.scale_y
             
             if math.isnan(x1_scaled) or math.isinf(x1_scaled) or math.isnan(y1_scaled) or math.isinf(y1_scaled):
                 return 
@@ -281,7 +423,7 @@ class LiveReferenceWindow(QWidget):
         for h in self.horizontal_lines:
             transform_and_draw_line(h)
 
-        # 2. Dessin des croix (Rouge) dans les cellules VIDES (PATCH NOUVEAU)
+        # 2. Dessin des croix (Rouge) dans les cellules VIDES 
         pen_cross = QPen(QColor(255, 0, 0, 200)) # Rouge
         pen_cross.setWidth(2)
         painter.setPen(pen_cross)
@@ -289,53 +431,168 @@ class LiveReferenceWindow(QWidget):
         for cell in self.grid_cells:
             if not cell['has_spot']:
                 
-                # Coordonnées mises à l'échelle des bords de la cellule
-                x_min_scaled = (cell['x_min'] - x_min) * scale_x
-                y_min_scaled = (cell['y_min'] - y_min) * scale_y
-                x_max_scaled = (cell['x_max'] - x_min) * scale_x
-                y_max_scaled = (cell['y_max'] - y_min) * scale_y
+                x_min_scaled = (cell['x_min'] - x_min) * self.scale_x
+                y_min_scaled = (cell['y_min'] - y_min) * self.scale_y
+                x_max_scaled = (cell['x_max'] - x_min) * self.scale_x
+                y_max_scaled = (cell['y_max'] - y_min) * self.scale_y
 
-                # Ligne 1 : (coin supérieur gauche) -> (coin inférieur droit)
                 painter.drawLine(int(x_min_scaled), int(y_min_scaled), int(x_max_scaled), int(y_max_scaled))
-                
-                # Ligne 2 : (coin inférieur gauche) -> (coin supérieur droit)
                 painter.drawLine(int(x_min_scaled), int(y_max_scaled), int(x_max_scaled), int(y_min_scaled))
 
         painter.end()
+        
+    def draw_vectors(self, painter): # <-- Logique MODIFIÉE avec scale_factor
+        """
+        Dessine les vecteurs de déplacement (ref_xspot -> ref_xspot + dx*factor) sur le QPainter.
+        """
+        if not self.show_vectors or not self.current_vectors or not hasattr(self, 'scale_x'):
+            return
+
+        x_min, y_min = self.coords.get('x_min', 0), self.coords.get('y_min', 0)
+        scale_factor = self.vector_scale_factor # Utilisation du facteur
+        
+        # Configure le stylo pour les vecteurs
+        pen_vector = QPen(QColor(255, 0, 0)) # ROUGE (Rouge Vif)
+        pen_vector.setWidth(2)
+        
+        # Configure le stylo pour les points d'origine (Point de Réf.)
+        pen_start_point = QPen(QColor(0, 0, 255)) # Bleu (Blue)
+        pen_start_point.setWidth(4)
+        
+        # Longueur de la pointe de la flèche (en pixels sur l'affichage)
+        ARROW_SIZE = 7
+
+        for vector in self.current_vectors:
+            
+            # 1. Coordonnées de DÉPART (Référence - Full Frame)
+            x0_full = vector['ref_xspot']
+            y0_full = vector['ref_yspot']
+            
+            # 2. Coordonnées de FIN (Position actuelle SCALÉE - Full Frame)
+            # On applique le facteur au déplacement (dx, dy)
+            x1_full_scaled_vec = x0_full + vector['dx'] * scale_factor
+            y1_full_scaled_vec = y0_full + vector['dy'] * scale_factor
+            
+            # --- Conversion en coordonnées LIVE (ROI mis à l'échelle) ---
+            
+            # Coordonnées de DÉPART (Point Bleu)
+            x0_live_scaled = (x0_full - x_min) * self.scale_x
+            y0_live_scaled = (y0_full - y_min) * self.scale_y
+            
+            # Coordonnées de FIN (Pointe Rouge SCALÉE)
+            x1_live_scaled_vec = (x1_full_scaled_vec - x_min) * self.scale_x
+            y1_live_scaled_vec = (y1_full_scaled_vec - y_min) * self.scale_y
+            
+            # --- Dessin du Vecteur ---
+            
+            # Dessin d'un cercle (point) au départ pour indiquer le point de référence
+            painter.setPen(pen_start_point)
+            painter.drawPoint(int(x0_live_scaled), int(y0_live_scaled))
+            
+            # Dessin de la ligne principale
+            painter.setPen(pen_vector)
+            painter.drawLine(int(x0_live_scaled), int(y0_live_scaled), 
+                             int(x1_live_scaled_vec), int(y1_live_scaled_vec))
+            
+            # --- Dessin de la Tête de Flèche (pointant vers la position actuelle SCALÉE) ---
+            dx_scaled = x1_live_scaled_vec - x0_live_scaled
+            dy_scaled = y1_live_scaled_vec - y0_live_scaled
+            length = math.sqrt(dx_scaled**2 + dy_scaled**2)
+                
+            if length > 0.5: 
+                
+                # Angle du vecteur par rapport à l'axe X (en radians)
+                angle = math.atan2(dy_scaled, dx_scaled)
+                
+                # Angles pour les deux côtés de la flèche (décalés de +/- 150 degrés)
+                angle_deg_1 = angle + math.radians(150)
+                angle_deg_2 = angle + math.radians(210) 
+
+                # Côté 1 de la flèche
+                ax1 = x1_live_scaled_vec + ARROW_SIZE * math.cos(angle_deg_1)
+                ay1 = y1_live_scaled_vec + ARROW_SIZE * math.sin(angle_deg_1)
+
+                # Côté 2 de la flèche
+                ax2 = x1_live_scaled_vec + ARROW_SIZE * math.cos(angle_deg_2)
+                ay2 = y1_live_scaled_vec + ARROW_SIZE * math.sin(angle_deg_2)
+
+                painter.setPen(pen_vector)
+                painter.drawLine(int(x1_live_scaled_vec), int(y1_live_scaled_vec), int(ax1), int(ay1))
+                painter.drawLine(int(x1_live_scaled_vec), int(y1_live_scaled_vec), int(ax2), int(ay2))
+
+
+    def toggle_live_video(self):
+        """Démarre ou arrête le QTimer pour le flux vidéo live."""
+        if self.is_paused:
+            self.timer.start(30)
+            self.pause_button.setText("Pause")
+            self.pause_button.setObjectName("pause_button")
+            self.pause_button.setStyleSheet(self._get_qstyle()) 
+            print("▶️ Flux vidéo live relancé.")
+        else:
+            self.timer.stop()
+            self.pause_button.setText("Lecture")
+            self.pause_button.setObjectName("play_button")
+            self.pause_button.setStyleSheet(self._get_qstyle()) 
+            print("⏸️ Flux vidéo live mis en pause.")
+        
+        self.is_paused = not self.is_paused
+        
+        if self.is_paused:
+            self.update_live_image()
 
 
     # --- Mise à jour de la vidéo live ---
-    def update_live_image(self):
-        frame = get_live_image()
-        if frame is not None:
-            if len(frame.shape) == 2:
-                frame = cv2.cvtColor(frame, cv2.COLOR_GRAY2BGR)
-            h, w, ch = frame.shape
-            bytes_per_line = ch * w
-            qt_image = QImage(frame.data, w, h, bytes_per_line, QImage.Format_BGR888)
-            pixmap = QPixmap.fromImage(qt_image)
+    def update_live_image(self): 
+        if self.timer.isActive() or self.is_paused: 
             
-            # Utilisation de Qt.IgnoreAspectRatio pour que l'image Remplisse EXACTEMENT le 500x500
-            pixmap = pixmap.scaled(self.live_label.size(), Qt.IgnoreAspectRatio, Qt.SmoothTransformation)
+            frame = get_live_image()
+            if frame is not None:
+                centers_roi, _ = detect_spots(frame)
+                
+                x_offset = self.coords.get('x_min', 0)
+                y_offset = self.coords.get('y_min', 0)
+                
+                centers_full_ref = []
+                for cx_roi, cy_roi in centers_roi:
+                    centers_full_ref.append((cx_roi + x_offset, cy_roi + y_offset))
+                
+                
+                cells = compute_cells_from_grid_ref(centers_full_ref, self.vertical_lines, self.horizontal_lines)
+                vectors = compare_grid_cells_and_compute_vectors(cells)
+                
+                self.current_vectors = vectors 
+                
+                # Le print du DeltaXY Moyen a été retiré, comme demandé.
+                
+                if len(frame.shape) == 2:
+                    frame = cv2.cvtColor(frame, cv2.COLOR_GRAY2BGR)
+                h, w, ch = frame.shape
+                bytes_per_line = ch * w
+                qt_image = QImage(frame.data, w, h, bytes_per_line, QImage.Format_BGR888)
+                pixmap = QPixmap.fromImage(qt_image)
+                
+                pixmap = pixmap.scaled(self.live_label.size(), Qt.IgnoreAspectRatio, Qt.SmoothTransformation)
 
-            # Superposition de la grille
-            if self.show_grid and self.grid_pixmap and not self.grid_pixmap.isNull():
-                painter = QPainter(pixmap)
-                painter.drawPixmap(0, 0, self.grid_pixmap)
+                painter = QPainter(pixmap) 
+
+                if self.show_grid and self.grid_pixmap and not self.grid_pixmap.isNull():
+                    painter.drawPixmap(0, 0, self.grid_pixmap)
+                
+                self.draw_vectors(painter) 
+
                 painter.end()
 
-            self.live_label.setPixmap(pixmap)
+                self.live_label.setPixmap(pixmap)
 
-    # --- Mise à jour de l'image de référence (PATCHÉ pour agrandir) ---
+
+    # --- Mise à jour de l'image de référence ---
     def update_reference_image(self):
-        # Lit le fichier PNG sans perte
         ref_image = cv2.imread('image_reference_centre.png')
         if ref_image is not None:
             if len(ref_image.shape) == 2:
                 ref_image = cv2.cvtColor(ref_image, cv2.COLOR_GRAY2BGR)
             
-            # MODIFIÉ : Redimensionne l'image AVANT de la convertir en QImage
-            # Utilisez INTER_LANCZOS4 pour une meilleure qualité d'agrandissement
             ref_image_resized = cv2.resize(ref_image, 
                                            (self.REF_DISPLAY_WIDTH, self.REF_DISPLAY_HEIGHT), 
                                            interpolation=cv2.INTER_LANCZOS4)
@@ -345,20 +602,20 @@ class LiveReferenceWindow(QWidget):
             qt_image = QImage(ref_image_resized.data, w, h, bytes_per_line, QImage.Format_BGR888)
             
             pixmap = QPixmap.fromImage(qt_image)
-            # Puisque l'image a déjà été redimensionnée à la taille du label, 
-            # on peut directement la définir ou la rescaler sans modification.
             self.ref_label.setPixmap(pixmap)
 
-    # --- Acquisition d'une nouvelle image de référence (inchangée pour les noms de fichiers) ---
+    # --- Acquisition d'une nouvelle image de référence ---
     def acquire_new_reference_image(self):
         print("🔵 Acquisition d’une nouvelle image de référence...")
-        self.acquire_button.setEnabled(False) # Désactiver pour éviter les doubles clics
-        QApplication.processEvents() # Forcer la mise à jour de l'UI
+        self.acquire_button.setEnabled(False) 
+        QApplication.processEvents() 
+        
+        was_running = self.timer.isActive()
+        if was_running:
+             self.timer.stop()
         
         try:
-            # Assurez-vous que capture_and_save_image() enregistre en PNG
             capture_and_save_image() 
-            # Passe le chemin du fichier PNG à process_and_save_images
             process_and_save_images('image_reference.png')
             
             self.coords = assign_coordinates_from_file('reference.txt')
@@ -367,24 +624,29 @@ class LiveReferenceWindow(QWidget):
                                self.coords['x_max'] - self.coords['x_min'],
                                self.coords['y_max'] - self.coords['y_min'])
                 print(f"🎯 Nouveau ROI appliqué : {self.coords}")
+            else:
+                print("❌ Échec de la détection de nouvelles coordonnées.")
                 
             self.vertical_lines, self.horizontal_lines = read_grid_from_reference('reference.txt')
-            # LECTURE DES NOUVELLES CELLULES
             self.grid_cells = read_grid_cells_from_reference('reference.txt') 
             
             self.create_grid_pixmap(self.live_label.width(), self.live_label.height())
             self.update_reference_image()
 
+        except Exception as e:
+            print(f"❌ Erreur lors de l'acquisition de référence : {e}")
+
         finally:
-            self.acquire_button.setEnabled(True) # Réactiver le bouton
+            self.acquire_button.setEnabled(True) 
+            if was_running:
+                 self.timer.start(30)
+
 
     # --- Mise à jour de l'exposition ---
     def update_exposure(self, value_us):
         """Met à jour l'exposition de la caméra en microsecondes (µs)."""
         try:
-            # La valeur 'value_us' vient directement du QSpinBox (en microsecondes)
             set_camera_exposure(value_us)
-            # Affichage en secondes pour le terminal
             print(f"✅ Exposition réglée sur {value_us / 1e6:.6f} s ({value_us} µs)")
         except Exception as e:
             print(f"❌ Erreur exposition : {e}")
@@ -399,12 +661,14 @@ class LiveReferenceWindow(QWidget):
             print(f"🎯 ROI de Zoom appliqué : {self.coords}")
             
             self.vertical_lines, self.horizontal_lines = read_grid_from_reference('reference.txt')
-            # LECTURE DES CELLULES
             self.grid_cells = read_grid_cells_from_reference('reference.txt') 
             self.create_grid_pixmap(self.live_label.width(), self.live_label.height())
 
 
 if __name__ == "__main__":
+    # Assurez-vous d'avoir une classe QDoubleSpinBox disponible si vous l'utilisez
+    from PyQt5.QtWidgets import QDoubleSpinBox 
+    
     app = QApplication(sys.argv)
     window = LiveReferenceWindow()
     sys.exit(app.exec_())

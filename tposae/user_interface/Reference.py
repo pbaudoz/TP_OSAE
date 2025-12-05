@@ -3,7 +3,7 @@ import numpy as np
 import math
 from scipy.ndimage import label, center_of_mass 
 
-# --- Détection des spots (NOUVELLE VERSION: Labellisation/Centre de Masse) ---
+# --- Détection des spots (inchangée) ---
 def detect_spots(image, threshold=0.12, min_area=10):
     """
     Détecte les centres lumineux dans l'image en utilisant la labellisation et le centre de masse
@@ -16,7 +16,7 @@ def detect_spots(image, threshold=0.12, min_area=10):
     labeled_image, num_features = label(binary_image)
     
     centers = []
-    valid_contours = [] # Nous devons toujours retourner une liste de contours pour la visualisation
+    valid_contours = [] 
     
     # Itération sur chaque région labellisée
     for i in range(1, num_features + 1):
@@ -41,12 +41,12 @@ def detect_spots(image, threshold=0.12, min_area=10):
                 biggest_contour = max(contours, key=cv2.contourArea)
                 valid_contours.append(biggest_contour)
 
-    # Note: On retourne les centres (x, y) et les contours correspondants
     return np.array(centers), valid_contours
 
-# --- Calcul grille et cellules (inchangée) ---
+# --- Calcul grille et cellules (MODIFIÉE pour inclure xspot, yspot) ---
 def compute_grid_and_cells(centers):
-    """Calcule les lignes de la grille et détermine l'état (spot présent/absent) de chaque cellule."""
+    """Calcule les lignes de la grille et détermine l'état (spot présent/absent) de chaque cellule 
+    en vérifiant si le centre du spot est dans les limites rectangulaires de la cellule et stocke ses coordonnées."""
     if len(centers) < 4:
         return [], [], [] 
 
@@ -90,8 +90,6 @@ def compute_grid_and_cells(centers):
     cells = []
     centers_tuple = [tuple(c) for c in centers]
     
-    tolerance = max(dx, dy) / 4 
-
     for j in range(len(horizontal_y_coords) - 1):
         for i in range(len(vertical_x_coords) - 1):
             x_start = vertical_x_coords[i]
@@ -103,11 +101,19 @@ def compute_grid_and_cells(centers):
             center_y = (y_start + y_end) / 2
             
             has_spot = False
+            xspot = None # Initialisation des coordonnées du spot réel
+            yspot = None 
 
-            for cx, cy in centers_tuple:
-                distance = np.sqrt((cx - center_x)**2 + (cy - center_y)**2)
-                if distance < tolerance:
+            # Logique d'appariement par surface
+            for cx_spot, cy_spot in centers_tuple:
+                
+                is_in_x = (x_start + 2 <= cx_spot < x_end - 2)
+                is_in_y = (y_start + 2 <= cy_spot < y_end - 2)
+                
+                if is_in_x and is_in_y:
                     has_spot = True
+                    xspot = cx_spot # Stockage des coordonnées du spot
+                    yspot = cy_spot # Stockage des coordonnées du spot
                     break 
                     
             cells.append({
@@ -117,12 +123,14 @@ def compute_grid_and_cells(centers):
                 'x_min': x_start,
                 'y_min': y_start,
                 'x_max': x_end,
-                'y_max': y_end
+                'y_max': y_end,
+                'xspot': xspot, 
+                'yspot': yspot 
             })
 
     return vertical_lines, horizontal_lines, cells
 
-# --- Écriture du fichier de référence (inchangée) ---
+# --- Écriture du fichier de référence (MODIFIÉE pour xspot/yspot) ---
 def write_reference_file(reference_file, x_min, x_max, y_min, y_max,
                             centers, vertical_lines, horizontal_lines, cells):
     """Écrit les coordonnées du ROI, des centres et de la grille dans le fichier de référence."""
@@ -147,16 +155,22 @@ def write_reference_file(reference_file, x_min, x_max, y_min, y_max,
     lines.append("#END grille\n\n")
     
     lines.append("#BEGIN cellules de grille\n")
-    lines.append("# Format : cx,cy,has_spot(0/1),x_min,y_min,x_max,y_max\n")
+    # Nouveau format
+    lines.append("# Format : cx,cy,has_spot(0/1),x_min,y_min,x_max,y_max,xspot,yspot\n") 
+    
     for c in cells:
-        lines.append(f"{c['cx']},{c['cy']},{int(c['has_spot'])},{c['x_min']},{c['y_min']},{c['x_max']},{c['y_max']}\n")
+        # Convertir None en 0.0 pour l'écriture dans le fichier si le spot est absent
+        xspot_val = c['xspot'] if c['xspot'] is not None else 0.0 
+        yspot_val = c['yspot'] if c['yspot'] is not None else 0.0
+        
+        lines.append(f"{c['cx']},{c['cy']},{int(c['has_spot'])},{c['x_min']},{c['y_min']},{c['x_max']},{c['y_max']},{xspot_val},{yspot_val}\n")
     lines.append("#END cellules de grille\n")
 
     with open(reference_file, 'w') as f:
         f.writelines(lines)
     print("📄 reference.txt mis à jour proprement")
 
-# --- Lecture des fonctions (inchangée) ---
+# --- Lecture des fonctions (MODIFIÉE pour xspot/yspot) ---
 def read_grid_cells_from_reference(filename='reference.txt'):
     """Lit les données des cellules de grille depuis le fichier de référence."""
     cells = []
@@ -180,7 +194,8 @@ def read_grid_cells_from_reference(filename='reference.txt'):
 
             try:
                 parts = [float(x) for x in line.split(",")]
-                if len(parts) == 7:
+                # Le format attend maintenant 9 parties
+                if len(parts) == 9: 
                     cells.append({
                         'cx': parts[0], 
                         'cy': parts[1], 
@@ -188,7 +203,9 @@ def read_grid_cells_from_reference(filename='reference.txt'):
                         'x_min': parts[3],
                         'y_min': parts[4],
                         'x_max': parts[5],
-                        'y_max': parts[6]
+                        'y_max': parts[6],
+                        'xspot': parts[7], 
+                        'yspot': parts[8]  
                     })
             except ValueError:
                 continue
@@ -273,7 +290,7 @@ def read_grid_from_reference(filename='reference.txt'):
         print(f"❌ Erreur lecture grille : {e}")
         return [], []
         
-# --- Traitement et sauvegarde image (PATCHÉ pour pixel 1x1) ---
+# --- Traitement et sauvegarde image (inchangée) ---
 def process_and_save_images(image_path):
     print(f"🔬 Début du traitement de l'image pour la référence : {image_path}")
     
@@ -299,10 +316,10 @@ def process_and_save_images(image_path):
 
     # Calcul du ROI de zoom autour des spots
     spots_centers_np = np.array(spots_centers)
-    x_min = max(0, np.min(spots_centers_np[:, 0]) - 50)
-    x_max = min(image.shape[1], np.max(spots_centers_np[:, 0]) + 50)
-    y_min = max(0, np.min(spots_centers_np[:, 1]) - 50)
-    y_max = min(image.shape[0], np.max(spots_centers_np[:, 1]) + 50)
+    x_min = max(0, np.min(spots_centers_np[:, 0]) - 25)
+    x_max = min(image.shape[1], np.max(spots_centers_np[:, 0]) + 25)
+    y_min = max(0, np.min(spots_centers_np[:, 1]) - 25)
+    y_max = min(image.shape[0], np.max(spots_centers_np[:, 1]) + 25)
     
     vertical_lines, horizontal_lines, cells = compute_grid_and_cells(spots_centers_np) 
     
