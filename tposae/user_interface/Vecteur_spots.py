@@ -1,6 +1,106 @@
-from Reference import detect_spots, read_grid_cells_from_reference
+from Reference import detect_spots, read_grid_cells_from_reference, assign_coordinates_from_file
 import numpy as np
 # Assurez-vous d'importer les fonctions nécessaires de votre fichier Reference.py si vous en avez besoin (par exemple, detect_spots)
+
+import cv2
+import numpy as np
+from scipy.ndimage import center_of_mass
+# Vous aurez besoin de la fonction read_grid_cells_from_reference (déjà fournie)
+# et de la fonction get_global_roi_offset (fournie ci-dessous).
+
+# --- Fonction utilitaire pour lire l'Offset du ROI Global ---
+def get_global_roi_offset(filename='reference.txt'):
+    """
+    Lit x_min et y_min pour obtenir le décalage global du ROI.
+    (Ces valeurs sont soustraites des coordonnées absolues de la grille pour
+     obtenir les indices de l'image rognée).
+    """
+    x_min_global, y_min_global = 0, 0
+    
+    # Utilisation de votre fonction assign_coordinates_from_file si elle est disponible
+    coords = assign_coordinates_from_file(filename) 
+    
+    if coords:
+        # Assurez-vous que la conversion en int fonctionne pour l'indexation
+        x_min_global = int(coords.get('x_min', 0))
+        y_min_global = int(coords.get('y_min', 0))
+        
+    return x_min_global, y_min_global
+
+
+def detect_spots_cells(image, grid_cells, filename_ref='reference.txt', threshold=0.15):
+    """
+    Calcule le Centre de Masse (CoM) des spots en utilisant directement les limites 
+    des cellules de grille comme masque (méthode de CoM direct).
+
+    Args:
+        image (np.array): Image (déjà rognée par le ROI global).
+        grid_cells (list): Liste de dictionnaires des cellules de grille (coordonnées absolues).
+        filename_ref (str): Nom du fichier de référence pour obtenir l'offset global du ROI.
+        threshold (float): Seuil de binarisation (normalisé).
+
+    Returns:
+        tuple: (np.array(centers), list(valid_contours))
+    """
+    # 1. Pré-calculs (Offset et Normalisation)
+    # Ceci est OBLIGATOIRE si l'image 'image' est rognée et que 'grid_cells' utilise des coordonnées absolues
+    x_offset, y_offset = get_global_roi_offset(filename_ref)
+    
+    # Normalisation de l'image
+    if image.max() == image.min():
+         norm_image = np.zeros_like(image, dtype=float)
+    else:
+        norm_image = (image - image.min()) / (image.max() - image.min())
+    
+    centers = []
+    valid_contours = []
+    
+    # Binarisation globale de l'image normalisée
+    binary_full_image = (norm_image > threshold).astype(np.uint8)
+
+    # 2. Itération sur les cellules de référence
+    for cell in grid_cells:
+        # On ne traite que les cellules qui contenaient un spot dans la référence
+        if cell['has_spot']:
+            
+            # 3. Calcul des limites de la cellule DANS l'espace de l'image rognée (AVEC DÉCALAGE)
+            y_start = int(max(0, cell['y_min'] - y_offset))
+            y_end = int(min(image.shape[0], cell['y_max'] - y_offset))
+            x_start = int(max(0, cell['x_min'] - x_offset))
+            x_end = int(min(image.shape[1], cell['x_max'] - x_offset))
+            
+            if x_end <= x_start or y_end <= y_start:
+                continue
+                
+            # 4. Extraire le ROI de l'image binaire
+            binary_roi = binary_full_image[y_start:y_end, x_start:x_end]
+            
+            # Vérifier s'il y a de l'intensité (au moins un pixel au-dessus du seuil)
+            if np.sum(binary_roi) == 0:
+                continue 
+
+            # 5. Calcul du Centre de Masse (CoM) sur la masse binaire DANS le ROI
+            # center_of_mass retourne (cy_roi, cx_roi)
+            cy_roi, cx_roi = center_of_mass(binary_roi) 
+            
+            # 6. Conversion en coordonnées de l'image rognée (décalage = x_start et y_start)
+            # Les coordonnées renvoyées sont celles que votre code de visualisation attend
+            cx_image_roi = int(round(cx_roi)) + x_start
+            cy_image_roi = int(round(cy_roi)) + y_start
+            
+            centers.append((cx_image_roi, cy_image_roi))
+            
+            # 7. Création d'un contour factice pour la compatibilité
+            contours, _ = cv2.findContours(binary_roi, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+            
+            if contours:
+                biggest_contour_roi = max(contours, key=cv2.contourArea)
+                
+                # Décaler les points du contour pour les ramener aux coordonnées de l'image rognée
+                shifted_contour = biggest_contour_roi + (x_start, y_start)
+                valid_contours.append(shifted_contour)
+
+    return np.array(centers), valid_contours
 
 def compute_cells_from_grid_ref(centers, vertical_lines, horizontal_lines):
     """
