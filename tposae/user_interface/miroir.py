@@ -3,9 +3,10 @@ from ctypes import *
 import time
 import numpy as np
 import threading
+import re
 from Reference import detect_spots, read_grid_from_reference, assign_coordinates_from_file
 from visualisation import get_live_image
-from Vecteur_spots import compute_cells_from_grid_ref, compare_grid_cells_and_compute_vectors
+from Vecteur_spots import compute_cells_from_grid_ref, read_grid_cells_from_reference
 
 # === VARIABLES GLOBALES ===
 lib = None
@@ -117,7 +118,6 @@ def activation_piston(numero_piston, tension, voltage_piston = np.ones(40)*0):
     return voltage_piston
 
 
-
 def set_all_pistons(voltage = 70):
     """
     Applique la même tension à tous les pistons du miroir DMP40.
@@ -148,54 +148,148 @@ def set_all_pistons(voltage = 70):
     tiltPattern[2] = 100  # ajustement piston 3
     lib.TLDFM_set_tilt_voltages(instrumentHandle, tiltPattern)
 
+def compute_interaction_vector(current_cells, ref_cells):
+    """
+    Génère un vecteur de signal (dx1, dx2..., dy1, dy2...) de taille constante
+    pour le calcul de la matrice d'interaction.
+    """
+    dx_vector = []
+    dy_vector = []
+
+    # On transforme les cellules actuelles en dictionnaire pour un accès rapide
+    current_dict = {(c['cx'], c['cy']): c for c in current_cells}
+
+    # On boucle sur la RÉFÉRENCE (qui est notre structure fixe)
+    for ref in ref_cells:
+        # On ne s'intéresse qu'aux cases qui DOIVENT avoir un spot
+        if ref['has_spot']:
+            key = (ref['cx'], ref['cy'])
+            
+            dx = 0.0
+            dy = 0.0
+            
+            # Si la cellule existe dans l'image actuelle ET qu'un spot y est vu
+            if key in current_dict and current_dict[key]['has_spot']:
+                dx = current_dict[key]['xspot'] - ref['xspot']
+                dy = current_dict[key]['yspot'] - ref['yspot']
+            
+            dx_vector.append(dx)
+            dy_vector.append(dy)
+
+    # On concatène pour avoir [dx1, dx2... dxN, dy1, dy2... dyN]
+    return np.array(dx_vector + dy_vector)
 
 def matrice_interaction():
-    """
-    Version thread-safe de matrice_interaction() pour PyQt.
-    Exécute la séquence de mise à 0V et retour à 70V sur chaque piston
-    dans un thread séparé pour ne pas bloquer l'interface.
-    """
     def worker():
         global lib, instrumentHandle, segmentCount
         if lib is None or instrumentHandle is None or segmentCount is None:
             print("❌ Le miroir n'est pas initialisé.")
             return
 
-        pattern = np.ones(segmentCount.value) * 70
-        frame = get_live_image()
+        # --- PRÉPARATION ---
+        # 1. Lire la référence UNE SEULE FOIS avant la boucle
+        ref_cells = read_grid_cells_from_reference('reference.txt')
         vertical_lines, horizontal_lines = read_grid_from_reference('reference.txt')
         coords = assign_coordinates_from_file('reference.txt')
+        x_offset = coords.get('x_min', 0)
+        y_offset = coords.get('y_min', 0)
+        
+        pattern = np.ones(segmentCount.value) * 70
+        MI = []
 
+        # --- BOUCLE DE CALIBRATION ---
         for numero_piston in range(segmentCount.value):
-            pattern[numero_piston] = 10
+            # Activer le piston
+            pattern[numero_piston] = 180
             type_c_pattern = c_double * segmentCount.value
             c_pattern = type_c_pattern(*pattern)
             lib.TLDFM_set_segment_voltages(instrumentHandle, c_pattern)
             
-            time.sleep(1)  # Pause d'une seconde pour chaque piston
+            time.sleep(1) 
             
+            # Capturer l'image actuelle (Attention: assure-toi que get_live_image() est à jour)
+            frame = get_live_image() 
             centers_roi, _ = detect_spots(frame)
-                
-            x_offset = coords.get('x_min', 0)
-            y_offset = coords.get('y_min', 0)
-                
-            centers_full_ref = []
-            for cx_roi, cy_roi in centers_roi:
-                centers_full_ref.append((cx_roi + x_offset, cy_roi + y_offset))
-            cells = compute_cells_from_grid_ref(centers_full_ref, vertical_lines, horizontal_lines)
-            vector = compare_grid_cells_and_compute_vectors(cells)
-            dx = vector[4]
-            dy = vector[5]
-
-
-            pattern[numero_piston] = 70
-            relax_miroir()
-            set_all_pistons(70)
-
-            time.sleep(1)
             
-        print("✅ Matrice d'interaction terminée.")
+            # Recalculer les coordonnées full frame
+            centers_full_ref = [(cx + x_offset, cy + y_offset) for cx, cy in centers_roi]
+            
+            # Calculer les cellules de l'image actuelle
+            current_cells = compute_cells_from_grid_ref(centers_full_ref, vertical_lines, horizontal_lines)
+            
+            # GÉNÉRATION DU VECTEUR ROBUSTE (Taille fixe, remplit de 0.0 si spot perdu)
+            vector_signal = compute_interaction_vector(current_cells, ref_cells)
+            MI.append(vector_signal)
 
-    # Création et lancement du thread
+            # Revenir à l'état repos
+            pattern[numero_piston] = 70
+            lib.TLDFM_set_segment_voltages(instrumentHandle, type_c_pattern(*pattern))
+            time.sleep(0.5)
+            
+        print("✅ Acquisition MI terminée. Calcul de la pseudo-inverse...")
+
+        # --- CALCUL ET SAUVEGARDE ---
+        matrice_MI = np.array(MI)
+        # Utilise un rcond un peu plus élevé (1e-3 ou 1e-2) pour filtrer le bruit
+        MC = np.linalg.pinv(matrice_MI, rcond=1e-2)
+
+        header = "\n#BEGIN matrice de controle\n"
+        footer = "#END matrice de controle\n"
+        matrix_text = ""
+        for row in MC:
+            matrix_text += ",".join(f"{val:.8f}" for val in row) + "\n"
+        
+        new_section = header + matrix_text + footer
+
+        try:
+            with open('reference.txt', 'r') as f:
+                content = f.read()
+
+            import re
+            pattern_regex = r"#BEGIN matrice de controle.*?#END matrice de controle\n?"
+            
+            if re.search(pattern_regex, content, re.DOTALL):
+                new_content = re.sub(pattern_regex, new_section, content, flags=re.DOTALL)
+            else:
+                new_content = content.strip() + "\n" + new_section
+
+            with open('reference.txt', 'w') as f:
+                f.write(new_content)
+                
+            print("💾 Section 'Matrice de controle' mise à jour avec succès.")
+        
+            
+        except Exception as e:
+            print(f"❌ Erreur lors de l'écriture : {e}")
+
+        header = "\n#BEGIN MI\n"
+        footer = "#END MI\n"
+        matrix_text = ""
+        for row in MI:
+            matrix_text += ",".join(f"{val:.8f}" for val in row) + "\n"
+        
+        new_section = header + matrix_text + footer
+
+        try:
+            with open('reference.txt', 'r') as f:
+                content = f.read()
+
+            import re
+            pattern_regex = r"#BEGIN MI.*?#END MI\n?"
+            
+            if re.search(pattern_regex, content, re.DOTALL):
+                new_content = re.sub(pattern_regex, new_section, content, flags=re.DOTALL)
+            else:
+                new_content = content.strip() + "\n" + new_section
+
+            with open('reference.txt', 'w') as f:
+                f.write(new_content)
+                
+            print("💾 Section 'MI' mise à jour avec succès.")
+        
+            
+        except Exception as e:
+            print(f"❌ Erreur lors de l'écriture : {e}")
+
     thread = threading.Thread(target=worker, daemon=True)
     thread.start()
