@@ -128,6 +128,16 @@ class LiveReferenceWindow(QWidget):
         self.live_label.setAlignment(Qt.AlignCenter)
         live_group_layout.addWidget(self.live_label)
 
+        
+        # Message prévention saturation
+        self.last_displayed_pct = -1.0
+        self.last_saturation_state = None
+
+        self.saturation_label = QLabel("Luminosité max : -- / 255")
+        self.saturation_label.setAlignment(Qt.AlignCenter)
+        self.saturation_label.setStyleSheet("font-weight: bold; font-size: 11pt; padding: 4px; border-radius: 4px; background-color: #1e1e1e; color: #4CAF50;")
+        live_group_layout.addWidget(self.saturation_label)
+
         viz_hbox = QHBoxLayout()
         self.pause_button = QPushButton("Pause")
         self.pause_button.setObjectName("pause_button")
@@ -161,10 +171,10 @@ class LiveReferenceWindow(QWidget):
         exposure_group_layout = QVBoxLayout(exposure_group)
         self.exposure_display = QSpinBox()
         self.exposure_display.setSuffix(" µs")
-        self.exposure_display.setRange(self.MIN_EXPOSURE_US, self.MAX_EXPOSURE_US)
-        self.exposure_display.setSingleStep(100)
+        self.exposure_display.setRange(self.MIN_EXPOSURE_US, 400)
+        self.exposure_display.setSingleStep(10)
         self.exposure_slider = QSlider(Qt.Horizontal)
-        self.exposure_slider.setRange(self.MIN_EXPOSURE_US, self.MAX_EXPOSURE_US)
+        self.exposure_slider.setRange(self.MIN_EXPOSURE_US, 400)
         self.exposure_slider.valueChanged.connect(self.exposure_display.setValue)
         self.exposure_display.valueChanged.connect(self.exposure_slider.setValue)
         self.exposure_display.valueChanged.connect(self.update_exposure)
@@ -177,11 +187,11 @@ class LiveReferenceWindow(QWidget):
         vector_scale_layout = QVBoxLayout(vector_scale_group)
         self.vector_scale_display = QDoubleSpinBox()
         self.vector_scale_display.setPrefix("x ")
-        self.vector_scale_display.setRange(1.0, 10.0)
+        self.vector_scale_display.setRange(1.0, 3.0)
         self.vector_scale_display.setSingleStep(0.5)
         self.vector_scale_display.setValue(self.vector_scale_factor)
         self.vector_scale_slider = QSlider(Qt.Horizontal)
-        self.vector_scale_slider.setRange(10, 100) # De 1.0 à 10.0
+        self.vector_scale_slider.setRange(10, 30) # De 1.0 à 10.0
         self.vector_scale_slider.setValue(int(self.vector_scale_factor * 10))
         self.vector_scale_slider.valueChanged.connect(self._update_vector_scale_from_slider)
         self.vector_scale_display.valueChanged.connect(self._update_vector_scale_from_spinbox)
@@ -491,53 +501,94 @@ class LiveReferenceWindow(QWidget):
             # Assure la mise à jour de la dernière image si on met en pause
             self.update_live_image()
 
+    def update_saturation_display(self, max_val):
+        current_pct = (max_val / 255.0) * 100.0
 
-    # --- Mise à jour de la vidéo live ---
-    def update_live_image(self): 
+        if max_val >= 254: 
+            state = "sat"
+        elif max_val >= 240: #95%
+            state = "warn"
+        elif max_val < 100: #40%
+            state = "low"
+        else:
+            state = "ok"
+
+        # Condition : on met à jour UNIQUEMENT si l'état change ou si l'écart dépasse 2 %
+        if (self.last_saturation_state != state) or (abs(current_pct - self.last_displayed_pct) >= 2.0):
+            self.last_displayed_pct = current_pct
+            self.last_saturation_state = state
+
+            if state == "sat":
+                self.saturation_label.setText(f"SATURÉ ! ({current_pct:.0f}%)")
+                self.saturation_label.setStyleSheet("font-weight: bold; font-size: 11pt; padding: 4px; border-radius: 4px; background-color: #8B0000; color: #FFFFFF;")
+            elif state == "warn":
+                self.saturation_label.setText(f"Proche saturation  ({current_pct:.0f}%)")
+                self.saturation_label.setStyleSheet("font-weight: bold; font-size: 11pt; padding: 4px; border-radius: 4px; background-color: #B8860B; color: #FFFFFF;")
+            elif state == "low":
+                self.saturation_label.setText(f"Signal faible ({current_pct:.0f}%)")
+                self.saturation_label.setStyleSheet("font-weight: bold; font-size: 11pt; padding: 4px; border-radius: 4px; background-color: #1e1e1e; color: #64B5F6;")
+            else:
+                self.saturation_label.setText(f"Luminosité max ({current_pct:.0f}%)")
+                self.saturation_label.setStyleSheet("font-weight: bold; font-size: 11pt; padding: 4px; border-radius: 4px; background-color: #1e1e1e; color: #4CAF50;")
+
+    def update_live_image(self):
+        
         if self.timer.isActive() or self.is_paused: 
+            result = get_live_image() 
+        if result is None: 
+            return 
+        
+        if isinstance(result, tuple): 
+            frame, max_val = result[0], result[1] 
+            self.update_saturation_display(max_val) 
             
-            frame = get_live_image()
-            if frame is not None:
-                centers_roi, _ = detect_spots_cells(frame, self.grid_cells)
-                
-                x_offset = self.coords.get('x_min', 0)
-                y_offset = self.coords.get('y_min', 0)
-                
-                centers_full_ref = []
-                for cx_roi, cy_roi in centers_roi:
-                    centers_full_ref.append((cx_roi + x_offset, cy_roi + y_offset))
-                
-                
-                cells = compute_cells_from_grid_ref(centers_full_ref, self.vertical_lines, self.horizontal_lines)
-                vectors = compare_grid_cells_and_compute_vectors(cells)
-                
-                self.current_vectors = vectors 
-                
-                # Le print du DeltaXY Moyen a été retiré, comme demandé.
-                
-                if len(frame.shape) == 2:
-                    frame = cv2.cvtColor(frame, cv2.COLOR_GRAY2BGR)
-                h, w, ch = frame.shape
-                bytes_per_line = ch * w
-                qt_image = QImage(frame.data, w, h, bytes_per_line, QImage.Format_BGR888)
-                pixmap = QPixmap.fromImage(qt_image)
-                
-                pixmap = pixmap.scaled(self.live_label.size(), Qt.IgnoreAspectRatio, Qt.SmoothTransformation)
+        else: frame = result 
+        
+        if frame is None: 
+            return
 
-                painter = QPainter(pixmap) 
 
-                if self.show_grid and self.grid_pixmap and not self.grid_pixmap.isNull():
-                    painter.drawPixmap(0, 0, self.grid_pixmap)
+        """centers_roi, _ = detect_spots_cells(frame, self.grid_cells)"""
+        centers_roi, _ = detect_spots_cells(frame, self.grid_cells, filename_ref=self.current_ref_file)        
+        x_offset = self.coords.get('x_min', 0)
+        y_offset = self.coords.get('y_min', 0)
                 
-                self.draw_vectors(painter) 
+        centers_full_ref = []
+        for cx_roi, cy_roi in centers_roi:
+            centers_full_ref.append((cx_roi + x_offset, cy_roi + y_offset))
+                
+                
+        cells = compute_cells_from_grid_ref(centers_full_ref, self.vertical_lines, self.horizontal_lines)
+        """vectors = compare_grid_cells_and_compute_vectors(cells)"""
+        vectors = compare_grid_cells_and_compute_vectors(cells, reference_filename=self.current_ref_file)
+       
+        self.current_vectors = vectors 
+                
+        # Le print du DeltaXY Moyen a été retiré, comme demandé.
+                
+        if len(frame.shape) == 2:
+            frame = cv2.cvtColor(frame, cv2.COLOR_GRAY2BGR)
+        h, w, ch = frame.shape
+        bytes_per_line = ch * w
+        qt_image = QImage(frame.data, w, h, bytes_per_line, QImage.Format_BGR888)
+        pixmap = QPixmap.fromImage(qt_image)
+                
+        pixmap = pixmap.scaled(self.live_label.size(), Qt.IgnoreAspectRatio, Qt.SmoothTransformation)
 
-                painter.end()
+        painter = QPainter(pixmap) 
 
-                self.live_label.setPixmap(pixmap)
+        if self.show_grid and self.grid_pixmap and not self.grid_pixmap.isNull():
+            painter.drawPixmap(0, 0, self.grid_pixmap)
+                
+        self.draw_vectors(painter) 
+
+        painter.end()
+
+        self.live_label.setPixmap(pixmap)
 
 
     # --- Mise à jour de l'image de référence ---
-    def update_reference_image(self):
+    """def update_reference_image(self):
         ref_image = cv2.imread('image_reference_centre.png')
         if ref_image is not None:
             if len(ref_image.shape) == 2:
