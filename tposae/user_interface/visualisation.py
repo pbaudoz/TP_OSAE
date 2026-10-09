@@ -26,16 +26,35 @@ def _connect_to_camera():
 def get_live_image():
     camera = _connect_to_camera()
     try:
-        image = next(camera.take_raw_exposures(NUM_EXPOSURES))
+        " Valeur brute de l'exposition en sortie de cam "
+        raw_expo = next(camera.take_raw_exposures(NUM_EXPOSURES))
+
+        max_val = np.max(raw_expo)
+        min_val = np.min(raw_expo)
+
+        " Normalisation : boucle nécessaire pour pas diviser par 0 "
+        if max_val > min_val: 
+            image = (raw_expo - min_val) / (max_val - min_val) * 255
+
+        else : 
+            image = np.zeros_like(raw_expo)
+
+        image = np.clip(image, 0, 255).astype(np.uint8)
+        
+        if hasattr(camera, "roi") and camera.roi is not None:
+            x, y, w, h = camera.roi
+            image = image[y:y+h, x:x+w]
+
+        """ image = next(camera.take_raw_exposures(NUM_EXPOSURES))
         image = (image - np.min(image)) / (np.max(image) - np.min(image)) * 255
         image = np.clip(image, 0, 255).astype(np.uint8)
 
         # Découpe du ROI si défini et non None
         if hasattr(camera, "roi") and camera.roi is not None:
             x, y, w, h = camera.roi
-            image = image[y:y+h, x:x+w]
+            image = image[y:y+h, x:x+w] """
 
-        return image
+        return image, max_val
 
     except Exception as e:
         print(f"❌ Erreur lors de la capture d'image : {e}")
@@ -57,7 +76,7 @@ def capture_and_save_image(num_acquisitions=500):
 
     # 2. Boucle d'Acquisition
     for i in range(num_acquisitions):
-        image = get_live_image()
+        image, max_val = get_live_image()
         
         if image is not None:
             # Assurez-vous que l'image est un tableau NumPy
@@ -99,7 +118,7 @@ def capture_and_save_image(num_acquisitions=500):
 def show_live():
     """Affiche la caméra en temps réel avec possibilité de fermer avec la croix."""
     while True:
-        image = get_live_image()
+        image, max_val = get_live_image()
         if image is not None:
             cv2.imshow("Camera Live", image)
         else:
