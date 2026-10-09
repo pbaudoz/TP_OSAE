@@ -27,8 +27,8 @@ def detect_spots(image, threshold=0.12, min_area=10):
             cy, cx = center_of_mass(region) 
             
             # center_of_mass retourne (y, x), nous le convertissons en (cx, cy) ou (x, y)
-            cx = int(round(cx)) 
-            cy = int(round(cy))
+            #cx = int(round(cx))
+            #cy = int(round(cy))
             
             centers.append((cx, cy))
             
@@ -142,7 +142,7 @@ def write_reference_file(reference_file, x_min, x_max, y_min, y_max,
 
     lines.append("#BEGIN centres des spots\n")
     for c in centers:
-        lines.append(f"{c[0]},{c[1]}\n")
+        lines.append(f"{c[0]:.4f},{c[1]:.4f}\n")
     lines.append("#END centres des spots\n\n")
 
     lines.append("#BEGIN grille\n")
@@ -229,7 +229,7 @@ def assign_coordinates_from_file(filename='reference.txt'):
                     continue
                 key, val = line.split(":")
                 if val.strip().isdigit():
-                    coords[key.strip()] = int(val.strip())
+                    coords[key.strip()] = int(float(val.strip()))
             return coords
     except Exception as e:
         print(f"❌ Erreur lors de la lecture des coordonnées : {e}")
@@ -316,10 +316,10 @@ def process_and_save_images(image_path):
 
     # Calcul du ROI de zoom autour des spots
     spots_centers_np = np.array(spots_centers)
-    x_min = max(0, np.min(spots_centers_np[:, 0]) - 25)
-    x_max = min(image.shape[1], np.max(spots_centers_np[:, 0]) + 25)
-    y_min = max(0, np.min(spots_centers_np[:, 1]) - 25)
-    y_max = min(image.shape[0], np.max(spots_centers_np[:, 1]) + 25)
+    x_min = int(max(0, np.min(spots_centers_np[:, 0]) - 25))
+    x_max = int(min(image.shape[1], np.max(spots_centers_np[:, 0]) + 25))
+    y_min = int(max(0, np.min(spots_centers_np[:, 1]) - 25))
+    y_max = int(min(image.shape[0], np.max(spots_centers_np[:, 1]) + 25))
     
     vertical_lines, horizontal_lines, cells = compute_grid_and_cells(spots_centers_np) 
     
@@ -338,8 +338,8 @@ def process_and_save_images(image_path):
         
         # Ajustement des coordonnées au ROI zoomé
         contour_adj = contour - [x_min, y_min]
-        x_center_adj = center[0] - x_min
-        y_center_adj = center[1] - y_min
+        x_center_adj = int(round(center[0] - x_min))
+        y_center_adj = int(round(center[1] - y_min))
         
         # A. Dessiner le contour non rempli en rouge (épaisseur 1)
         cv2.drawContours(image_zoom, [contour_adj], -1, (0, 0, 255), 1) 
