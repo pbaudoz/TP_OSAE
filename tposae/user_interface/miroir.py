@@ -198,17 +198,19 @@ def matrice_interaction():
         MI = []
 
         # --- BOUCLE DE CALIBRATION ---
+        
         for numero_piston in range(segmentCount.value):
             # Activer le piston
             pattern[numero_piston] = 180
+            print(numero_piston, "/", segmentCount.value)
             type_c_pattern = c_double * segmentCount.value
             c_pattern = type_c_pattern(*pattern)
             lib.TLDFM_set_segment_voltages(instrumentHandle, c_pattern)
             
-            time.sleep(1) 
+            #time.sleep(1) 
             
             # Capturer l'image actuelle (Attention: assure-toi que get_live_image() est à jour)
-            frame = get_live_image() 
+            frame, max_val = get_live_image() 
             centers_roi, _ = detect_spots(frame)
             
             # Recalculer les coordonnées full frame

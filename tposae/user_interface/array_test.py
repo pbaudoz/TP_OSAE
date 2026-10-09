@@ -78,10 +78,3 @@ def load_MI_from_file(filename='reference.txt'):
     except Exception as e:
         print(f"❌ Erreur lors de la lecture de MI : {e}")
         return None
-    
-MC = load_control_matrix_from_file()
-MI = load_MI_from_file()
-v=MI[0,:]
-
-V=110*v @ MC
-print(V)
