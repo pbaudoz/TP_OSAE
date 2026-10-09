@@ -2,10 +2,14 @@ import sys
 import cv2
 import numpy as np
 import math
+import os
+from datetime import datetime
+import shutil
+
 from PyQt5.QtWidgets import (
     QApplication, QWidget, QLabel, QPushButton, QCheckBox, QVBoxLayout, 
     QHBoxLayout, QLineEdit, QFrame, QGroupBox, QSizePolicy, 
-    QSlider, QSpinBox, QTextEdit, QDoubleSpinBox
+    QSlider, QSpinBox, QTextEdit, QDoubleSpinBox, QFileDialog, QInputDialog, QMessageBox 
 )
 from PyQt5.QtGui import QImage, QPixmap, QPainter, QColor, QPen, QFont
 from PyQt5.QtCore import QTimer, Qt, QObject, pyqtSignal 
@@ -16,6 +20,8 @@ from Reference import detect_spots, process_and_save_images, assign_coordinates_
 from Vecteur_spots import compute_cells_from_grid_ref, compare_grid_cells_and_compute_vectors, detect_spots_cells
 # --- MISE À JOUR IMPORT MIROIR : Ajout de set_all_pistons et matrice_interaction ---
 from miroir import initialisation_miroir, relax_miroir, set_all_pistons, matrice_interaction 
+from array_test import load_control_matrix_from_file, load_MI_from_file
+
 
 # --- NOUVELLE CLASSE POUR LA JOURNALISATION ---
 class LogHandler(QObject):
@@ -36,10 +42,17 @@ class LiveReferenceWindow(QWidget):
         self.setGeometry(100, 100, 1200, 800) 
         self.setStyleSheet(self._get_qstyle())
 
+        self.ARCHIVE_DIR = "anciennes_ref"
+        os.makedirs(self.ARCHIVE_DIR, exist_ok=True)
+        self.current_ref_file = 'reference.txt'
+        self.MI = None
+        self.MC = None
+
+
         # --- Variables ---
         self.LIVE_WIDTH = 500
         self.LIVE_HEIGHT = 500
-        self.BASE_EXPOSURE_US = 200 
+        self.BASE_EXPOSURE_US = 30
         self.MAX_EXPOSURE_US = 1000000 
         self.MIN_EXPOSURE_US = 10
         self.is_paused = False
@@ -60,6 +73,8 @@ class LiveReferenceWindow(QWidget):
             print("✅ Miroir initialisé au lancement.")
         except Exception as e:
             print(f"❌ Erreur initialisation miroir : {e}")
+
+        self._reload_reference_data(self.current_ref_file)
 
         if self.coords:
             set_camera_roi(self.coords['x_min'], self.coords['y_min'],
@@ -261,10 +276,53 @@ class LiveReferenceWindow(QWidget):
         
         ref_log_col.addStretch(1)
         main_layout.addLayout(ref_log_col)
-        
+
+        self.load_archive_button = QPushButton("📂 Ancienne Référence")
+        self.load_archive_button.clicked.connect(self.choose_archive_reference)
+        commands_layout.addWidget(self.load_archive_button)
+
+        self.active_ref_label = QLabel(f"Réf. active : {os.path.basename(self.current_ref_file)}")
+        self.active_ref_label.setStyleSheet("font-size: 9pt; color: #81C784;")
+        commands_layout.addWidget(self.active_ref_label)
+
     # ---------------------------
     # Logging
     # ---------------------------
+    def _reload_reference_data(self, filepath):
+        """Met à jour l'ensemble des paramètres du système à partir du fichier choisi."""
+        self.current_ref_file = filepath
+        if hasattr(self, 'active_ref_label'):
+            self.active_ref_label.setText(f"Réf. active : {os.path.basename(filepath)}")
+
+        # 1. ROI Caméra
+        self.coords = assign_coordinates_from_file(self.current_ref_file)
+        if self.coords:
+            set_camera_roi(self.coords['x_min'], self.coords['y_min'],
+                           self.coords['x_max'] - self.coords['x_min'],
+                           self.coords['y_max'] - self.coords['y_min'])
+            print(f"✅ Nouveau ROI appliqué : {self.coords}")
+        else:
+            self.coords = {'x_min': 0, 'y_min': 0, 'x_max': 500, 'y_max': 500} 
+            print(f"⚠️ Coordonnées non trouvées dans {filepath}. ROI par défaut appliqué.")
+
+        # 2. Grille et cellules
+        self.vertical_lines, self.horizontal_lines = read_grid_from_reference(self.current_ref_file)
+        self.grid_cells = read_grid_cells_from_reference(self.current_ref_file)
+        self.show_grid = False
+        self.create_grid_pixmap(self.LIVE_WIDTH, self.LIVE_HEIGHT)
+
+        # 3. Matrices MI et MC
+        self.MI = load_MI_from_file(self.current_ref_file)
+        self.MC = load_control_matrix_from_file(self.current_ref_file)
+        if self.MI is not None:
+            print(f"✅ Matrice MI chargée depuis {filepath}")
+        if self.MC is not None:
+            print(f"✅ Matrice MC chargée depuis {filepath}")
+
+        self.update_reference_image()
+        print(f"🔄 Système synchronisé avec la référence : {filepath}")
+
+
     def _setup_logging(self):
         self.log_handler = LogHandler()
         self.log_handler.new_text.connect(self._append_to_log)
@@ -603,10 +661,32 @@ class LiveReferenceWindow(QWidget):
             qt_image = QImage(ref_image_resized.data, w, h, bytes_per_line, QImage.Format_BGR888)
             
             pixmap = QPixmap.fromImage(qt_image)
+            self.ref_label.setPixmap(pixmap)"""
+    def update_reference_image(self):
+        base_name, _ = os.path.splitext(self.current_ref_file)
+        archive_img_path = f"{base_name}_centre.png"
+        
+        img_to_load = archive_img_path if os.path.exists(archive_img_path) else 'image_reference_centre.png'
+
+        ref_image = cv2.imread(img_to_load)
+        if ref_image is not None:
+            if len(ref_image.shape) == 2:
+                ref_image = cv2.cvtColor(ref_image, cv2.COLOR_GRAY2BGR)
+            
+            ref_image_resized = cv2.resize(
+                ref_image, 
+                (self.REF_DISPLAY_WIDTH, self.REF_DISPLAY_HEIGHT), 
+                interpolation=cv2.INTER_LANCZOS4
+            )
+            
+            h, w, ch = ref_image_resized.shape
+            bytes_per_line = ch * w
+            qt_image = QImage(ref_image_resized.data, w, h, bytes_per_line, QImage.Format_BGR888)
+            pixmap = QPixmap.fromImage(qt_image)
             self.ref_label.setPixmap(pixmap)
 
     # --- Acquisition d'une nouvelle image de référence ---
-    def acquire_new_reference_image(self):
+    """def acquire_new_reference_image(self):
         print("🔵 Acquisition d’une nouvelle image de référence...")
         self.acquire_button.setEnabled(False) 
         QApplication.processEvents() 
@@ -640,8 +720,79 @@ class LiveReferenceWindow(QWidget):
         finally:
             self.acquire_button.setEnabled(True) 
             if was_running:
-                 self.timer.start(30)
+                 self.timer.start(30)"""
 
+    def acquire_new_reference_image(self):
+        print("🔵 Acquisition d’une nouvelle image de référence...")
+        self.acquire_button.setEnabled(False) 
+        QApplication.processEvents() 
+        
+        was_running = self.timer.isActive()
+        if was_running:
+            self.timer.stop()
+        
+        try:
+            capture_and_save_image() 
+            process_and_save_images('image_reference.png')
+            
+            # Recharge et applique la référence fraîchement créée
+            self._reload_reference_data('reference.txt')
+            print("✅ Nouvelle référence calculée et activée.")
+
+            # --- POP-UP D'ENREGISTREMENT ---
+            reply = QMessageBox.question(
+                self, 
+                "Archiver la référence",
+                "Voulez-vous enregistrer cette référence dans un autre fichier ?",
+                QMessageBox.Yes | QMessageBox.No,
+                QMessageBox.Yes
+            )
+
+            if reply == QMessageBox.Yes:
+                nom_defaut = f"ref_{datetime.now().strftime('%Y%m%d_%H%M%S')}.txt"
+                nom, ok = QInputDialog.getText(
+                    self, 
+                    "Nom de la référence", 
+                    "Nom du fichier (.txt) :", 
+                    QLineEdit.Normal, 
+                    nom_defaut
+                )
+
+                if ok and nom.strip():
+                    if not nom.endswith(".txt"):
+                        nom += ".txt"
+
+                    target_txt = os.path.join(self.ARCHIVE_DIR, nom)
+                    shutil.copyfile("reference.txt", target_txt)
+
+                    # Sauvegarde des images de référence avec le même nom
+                    base_name, _ = os.path.splitext(target_txt)
+                    if os.path.exists("image_reference.png"):
+                        shutil.copyfile("image_reference.png", f"{base_name}.png")
+                    if os.path.exists("image_reference_centre.png"):
+                        shutil.copyfile("image_reference_centre.png", f"{base_name}_centre.png")
+
+                    print(f"💾 Référence archivée sous : {target_txt}")
+                    self._reload_reference_data(target_txt)
+
+        except Exception as e:
+            print(f"❌ Erreur lors de l'acquisition de référence : {e}")
+
+        finally:
+            self.acquire_button.setEnabled(True) 
+            if was_running:
+                self.timer.start(30)
+    def choose_archive_reference(self):
+        filepath, _ = QFileDialog.getOpenFileName(
+            self,
+            "Sélectionner une ancienne référence",
+            os.path.abspath(self.ARCHIVE_DIR),
+            "Fichiers Référence (*.txt)"
+        )
+
+        if filepath:
+            print(f"📂 Chargement de l'ancienne référence : {filepath}")
+            self._reload_reference_data(filepath)
 
     # --- Mise à jour de l'exposition ---
     def update_exposure(self, value_us):
