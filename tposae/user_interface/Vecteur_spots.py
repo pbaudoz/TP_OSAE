@@ -85,8 +85,8 @@ def detect_spots_cells(image, grid_cells, filename_ref='reference.txt', threshol
             
             # 6. Conversion en coordonnées de l'image rognée (décalage = x_start et y_start)
             # Les coordonnées renvoyées sont celles que votre code de visualisation attend
-            cx_image_roi = int(round(cx_roi)) + x_start
-            cy_image_roi = int(round(cy_roi)) + y_start
+            cx_image_roi = (cx_roi) + x_start
+            cy_image_roi = (cy_roi) + y_start
             
             centers.append((cx_image_roi, cy_image_roi))
             
